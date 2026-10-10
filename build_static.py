@@ -41,9 +41,13 @@ def main() -> None:
 
     # Home page. APP_URL (e.g. the public URL of the Flask app) is injected at build time.
     app_url = os.environ.get("APP_URL", "").strip().rstrip("/")
-    html = (Path("pages") / "index.html").read_text().replace("__APP_URL__", app_url)
-    (SITE / "index.html").write_text(html)
-    print(f"wrote {SITE / 'index.html'} (APP_URL {'set' if app_url else 'not set'})")
+    # Pages routes: pages/index.html -> /, pages/<name>/index.html -> /<name>/
+    for src in sorted(Path("pages").rglob("index.html")):
+        rel = src.parent.relative_to("pages")
+        out = SITE / rel / "index.html"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(src.read_text().replace("__APP_URL__", app_url))
+        print(f"wrote {out} (APP_URL {'set' if app_url else 'not set'})")
 
     # Stop GitHub from running Jekyll over the output.
     (SITE / ".nojekyll").touch()
