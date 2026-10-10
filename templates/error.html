@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Error · Pips Storage{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Something went wrong</h1>
+  <p class="error">{{ message }}</p>
+  <p class="muted">Status {{ status }}. <a href="{{ url_for('home') }}">Back to home</a></p>
+</div>
+{% endblock %}

@@ -9,9 +9,22 @@ Public file-storage API and UI. **Data is stored in a private repo**
 pip install -r requirements.txt
 export GITHUB_TOKEN=...            # fine-grained, Contents read/write on the private repo only
 export PRIVATE_DATA_REPO=web12-app/api-curl-private-data
-export API_KEY=...                 # required for upload/delete
+export API_KEY=...                 # optional, for scripts
+export SECRET_KEY=...              # signs login sessions
 python app.py                      # http://127.0.0.1:5000
 ```
+
+## Pages
+
+| Path | Who | What |
+| --- | --- | --- |
+| `/` | anyone | Welcome page with Log in / Sign up |
+| `/signup` | anyone | Create an account (username + password, min 8 chars) |
+| `/login` | anyone | Log in |
+| `/dashboard` | logged in | Upload, list, download, delete your files |
+| `/logout` | logged in | Log out |
+
+Accounts are stored as `users/<name>.json` in the private repo, with bcrypt-style hashed passwords (Werkzeug).
 
 ## Endpoints
 
@@ -20,8 +33,9 @@ python app.py                      # http://127.0.0.1:5000
 | GET | `/` | none | UI |
 | GET | `/api/files` | none | list files |
 | GET | `/api/files/<name>` | none | download |
-| POST | `/api/files` | `X-API-Key` | upload (form field `file`, max 1 MB) |
-| DELETE | `/api/files/<name>` | `X-API-Key` | delete |
+| POST | `/api/files` | session or `X-API-Key` | upload (form field `file`, max 1 MB) |
+| DELETE | `/api/files/<name>` | session or `X-API-Key` | delete |
+| GET | `/api/me` | none | current user (or null) |
 
 ```bash
 curl -H "X-API-Key: $API_KEY" -F "file=@notes.txt" http://127.0.0.1:5000/api/files

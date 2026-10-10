@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Sign up' if mode == 'signup' else 'Log in' }} · Pips Storage{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>{{ 'Create an account' if mode == 'signup' else 'Log in' }}</h1>
+  <form method="post" action="{{ url_for(mode) }}">
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" required autocomplete="username"
+           pattern="[A-Za-z0-9_]{3,32}" title="3-32 letters, digits, or underscores">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" required
+           autocomplete="{{ 'new-password' if mode == 'signup' else 'current-password' }}"
+           {% if mode == 'signup' %}minlength="8"{% endif %}>
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <div class="actions">
+      <button class="btn" type="submit">{{ 'Sign up' if mode == 'signup' else 'Log in' }}</button>
+    </div>
+  </form>
+  <p class="muted">
+    {% if mode == 'signup' %}
+      Already have an account? <a href="{{ url_for('login') }}">Log in</a>
+    {% else %}
+      New here? <a href="{{ url_for('signup') }}">Sign up</a>
+    {% endif %}
+  </p>
+</div>
+{% endblock %}

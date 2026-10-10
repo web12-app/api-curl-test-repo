@@ -6,6 +6,7 @@ The public app never stores data itself. All config comes from env values:
   PRIVATE_DATA_PREFIX   folder inside that repo for files (default "files/")
 """
 import base64
+import json
 import os
 import re
 
@@ -98,3 +99,46 @@ def delete_file(name: str):
                         json={"message": f"delete {name}", "sha": d["sha"]}, timeout=20)
     _check(r, ok=(200,))
     return {"deleted": name}
+
+
+# ---------------------------------------------------------------- users
+# Each user is one JSON file in the private repo: <USERS_PREFIX><username>.json
+USERS_PREFIX = "users/"
+USER_RE = re.compile(r"^[a-z0-9_]{3,32}$")
+
+
+def valid_username(name: str) -> bool:
+    return bool(USER_RE.match(name or ""))
+
+
+def _raw_get(path):
+    token, repo, _ = _cfg()
+    r = requests.get(f"{API}/repos/{repo}/contents/{path}", headers=_headers(token), timeout=20)
+    if r.status_code == 404:
+        return None
+    d = _check(r)
+    return base64.b64decode(d.get("content", "")), d["sha"]
+
+
+def get_user(username: str):
+    if not valid_username(username):
+        return None
+    got = _raw_get(f"{USERS_PREFIX}{username}.json")
+    if got is None:
+        return None
+    return json.loads(got[0])
+
+
+def create_user(username: str, password_hash: str):
+    if not valid_username(username):
+        raise StorageError("Username must be 3-32 letters, digits, or underscores (lowercase).", 400)
+    token, repo, _ = _cfg()
+    path = f"{USERS_PREFIX}{username}.json"
+    if _raw_get(path) is not None:
+        raise StorageError("That username is already taken.", 409)
+    payload = json.dumps({"username": username, "password_hash": password_hash}).encode()
+    r = requests.put(f"{API}/repos/{repo}/contents/{path}", headers=_headers(token),
+                     json={"message": f"create user {username}",
+                           "content": base64.b64encode(payload).decode()}, timeout=20)
+    _check(r, ok=(200, 201))
+    return {"username": username}

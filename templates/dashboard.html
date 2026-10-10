@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · Pips Storage{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<p class="muted">Signed in as <strong>{{ user }}</strong></p>
+
+<div class="card">
+  <h3 style="margin-top:0">Upload a file</h3>
+  <input id="file" type="file">
+  <div class="actions"><button id="upload" class="btn">Upload</button></div>
+  <div id="status"></div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Your files</h3>
+  <table><tbody id="list"><tr><td class="muted">Loading…</td></tr></tbody></table>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  function say(msg, cls) { const s = $("status"); s.textContent = msg; s.className = cls || ""; }
+  async function readError(r) {
+    try { return (await r.json()).error || r.statusText; } catch (e) { return r.statusText; }
+  }
+  async function load() {
+    const r = await fetch("/api/files");
+    const tbody = $("list");
+    if (!r.ok) {
+      tbody.innerHTML = "";
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.className = "error"; td.textContent = await readError(r);
+      tr.append(td); tbody.append(tr);
+      return;
+    }
+    const { files } = await r.json();
+    tbody.innerHTML = "";
+    if (!files.length) { tbody.innerHTML = '<tr><td class="muted">No files yet.</td></tr>'; return; }
+    for (const f of files) {
+      const tr = document.createElement("tr");
+      const name = document.createElement("td"); name.textContent = f.name;
+      const size = document.createElement("td"); size.className = "muted"; size.textContent = f.size + " bytes";
+      const acts = document.createElement("td"); acts.style.textAlign = "right";
+      const dl = document.createElement("button"); dl.className = "btn secondary small"; dl.textContent = "Download";
+      dl.onclick = () => download(f.name);
+      const rm = document.createElement("button"); rm.className = "btn danger small"; rm.textContent = "Delete";
+      rm.onclick = () => remove(f.name);
+      acts.append(dl, rm);
+      tr.append(name, size, acts);
+      tbody.append(tr);
+    }
+  }
+  async function download(name) {
+    const r = await fetch("/api/files/" + encodeURIComponent(name));
+    if (!r.ok) return say(await readError(r), "error");
+    const url = URL.createObjectURL(await r.blob());
+    const a = Object.assign(document.createElement("a"), { href: url, download: name });
+    a.click(); URL.revokeObjectURL(url);
+  }
+  async function remove(name) {
+    if (!confirm("Delete " + name + "?")) return;
+    const r = await fetch("/api/files/" + encodeURIComponent(name), { method: "DELETE" });
+    if (!r.ok) return say(await readError(r), "error");
+    say("Deleted " + name, "ok"); load();
+  }
+  $("upload").onclick = async () => {
+    const f = $("file").files[0];
+    if (!f) return say("Choose a file first.", "error");
+    const fd = new FormData(); fd.append("file", f, f.name);
+    const r = await fetch("/api/files", { method: "POST", body: fd });
+    if (!r.ok) return say(await readError(r), "error");
+    say("Uploaded " + f.name, "ok"); $("file").value = ""; load();
+  };
+  load();
+</script>
+{% endblock %}
