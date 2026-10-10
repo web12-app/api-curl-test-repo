@@ -4,6 +4,7 @@
 <div class="card">
   <h1>{{ 'Create an account' if mode == 'signup' else 'Log in' }}</h1>
   <form method="post" action="{{ url_for(mode) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <label for="username">Username</label>
     <input id="username" name="username" type="text" required autocomplete="username"
            pattern="[A-Za-z0-9_]{3,32}" title="3-32 letters, digits, or underscores">

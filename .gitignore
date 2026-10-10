@@ -1,3 +1,11 @@
 .env
 __pycache__/
 *.pyc
+
+# local secrets and generated data
+.env
+.env.*
+!.env.example
+*.log
+.pytest_cache/
+_site/

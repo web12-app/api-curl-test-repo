@@ -8,14 +8,15 @@ import os
 import shutil
 from pathlib import Path
 
-from app import app
+from datetime import datetime, timezone
 
+# The build does not import the app: CI has no runtime secrets, and Pages only needs these
+# public, non-secret payloads. Keep these in sync with /api/hello and /api/time in app.py.
 SITE = Path("_site")
 
-# Flask route -> static file written under _site/
-ROUTES = {
-    "/api/hello": "api/hello.json",
-    "/api/time": "api/time.json",
+STATIC_API = {
+    "api/hello.json": {"message": "Hello from Python!", "source": "api-curl-test-repo"},
+    "api/time.json": {"utc": None},  # filled in at build time
 }
 
 
@@ -24,19 +25,16 @@ def main() -> None:
         shutil.rmtree(SITE)
     SITE.mkdir(parents=True)
 
-    client = app.test_client()
-    for route, target in ROUTES.items():
-        resp = client.get(route)
-        if resp.status_code != 200:
-            raise SystemExit(f"{route} returned {resp.status_code}")
+    STATIC_API["api/time.json"]["utc"] = datetime.now(timezone.utc).isoformat()
+    for target, payload in STATIC_API.items():
         out = SITE / target
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(resp.get_data())
-        print(f"wrote {out} ({len(resp.get_data())} bytes)")
+        out.write_text(json.dumps(payload) + "\n")
+        print(f"wrote {out}")
 
     # Index of available endpoints, so /api/ isn't empty on Pages.
     index = SITE / "api" / "index.json"
-    index.write_text(json.dumps({"endpoints": sorted(ROUTES.values())}, indent=2) + "\n")
+    index.write_text(json.dumps({"endpoints": sorted(STATIC_API)}, indent=2) + "\n")
     print(f"wrote {index}")
 
     # Home page. APP_URL (e.g. the public URL of the Flask app) is injected at build time.
