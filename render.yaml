@@ -1,0 +1,28 @@
+# Render blueprint for the app server (Flask API + login/signup/dashboard pages).
+# Create it in Render: New > Blueprint > pick this repo and the platform-v1 branch.
+# Secrets marked sync: false are entered in the Render dashboard, never committed.
+services:
+  - type: web
+    name: pips-platform-api
+    runtime: python
+    plan: free
+    branch: platform-v1
+    buildCommand: pip install -r requirements.txt
+    # One worker: rate limits are in-process, so multiple workers would multiply the limits.
+    startCommand: gunicorn -w 1 -b 0.0.0.0:$PORT app:app
+    healthCheckPath: /api/health
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: API_KEY_HASH_SECRET
+        generateValue: true
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: PRIVATE_DATA_REPO
+        value: web12-app/api-curl-private-data
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://web12-app.github.io
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: COOKIE_SAMESITE
+        value: Lax
