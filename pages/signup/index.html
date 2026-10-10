@@ -22,19 +22,13 @@
 <body>
   <div class="card">
     <h1>Create an account</h1>
-    <form method="post" action="__APP_URL__/signup">
-      <label for="username">Username (3-32 lowercase letters, digits, or _)</label>
-      <input id="username" name="username" type="text" required pattern="[a-z0-9_]{3,32}" autocomplete="username">
-      <label for="password">Password (at least 8 characters)</label>
-      <input id="password" name="password" type="password" required minlength="8" autocomplete="new-password">
-      <button class="btn" id="submit" type="submit">Sign up</button>
-    </form>
-    <p>Already have an account? <a href="../login/">Log in</a> · <a href="../">Home</a></p>
+    <p>Accounts are created on the app server. Usernames are 3-32 lowercase letters, digits, or underscores. Passwords need at least 8 characters.</p><div class="actions"><a class="btn" data-app href="__APP_URL__/signup">Continue to sign up</a><a class="btn secondary" href="../login/">Log in</a></div><p><a href="../">Home</a></p>
     <p class="note" id="note"></p>
   </div>
   <script>
+    // Forms and sessions live on the app server (cookies are tied to it). This page only links there.
     if (!"__APP_URL__") {
-      document.getElementById("submit").disabled = true;
+      document.querySelectorAll("a[data-app]").forEach(a => { a.removeAttribute("href"); a.setAttribute("aria-disabled", "true"); });
       document.getElementById("note").textContent = "Sign up is not available yet: the app server is not configured (APP_URL).";
     }
   </script>

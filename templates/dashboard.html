@@ -2,75 +2,180 @@
 {% block title %}Dashboard · Pips Storage{% endblock %}
 {% block content %}
 <h1>Dashboard</h1>
-<p class="muted">Signed in as <strong>{{ user }}</strong></p>
+<p class="muted">Signed in as <strong>{{ user.username if user else '' }}</strong></p>
 
 <div class="card">
-  <h3 style="margin-top:0">Upload a file</h3>
+  <h3 style="margin-top:0">Your apps</h3>
+  <form id="new-app" class="inline">
+    <input id="app-name" type="text" maxlength="80" placeholder="New app name" required>
+    <button class="btn" type="submit">Create app</button>
+  </form>
+  <p id="app-status" class="muted"></p>
+  <table><tbody id="apps"><tr><td class="muted">Loading…</td></tr></tbody></table>
+</div>
+
+<div class="card" id="keys-card" hidden>
+  <h3 style="margin-top:0">API keys for <span id="keys-app"></span></h3>
+  <form id="new-key" class="inline">
+    <input id="key-name" type="text" maxlength="80" placeholder="Key name" required>
+    <select id="key-env"><option value="development">development</option><option value="production">production</option></select>
+    <label class="check"><input type="checkbox" name="scope" value="db:read" checked> db:read</label>
+    <label class="check"><input type="checkbox" name="scope" value="db:write" checked> db:write</label>
+    <label class="check"><input type="checkbox" name="scope" value="files:read"> files:read</label>
+    <label class="check"><input type="checkbox" name="scope" value="files:write"> files:write</label>
+    <button class="btn" type="submit">Create key</button>
+  </form>
+  <div id="new-secret" hidden class="secret">
+    <p><strong>Copy this key now.</strong> It will not be shown again.</p>
+    <code id="secret-value"></code>
+  </div>
+  <table><tbody id="keys"></tbody></table>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0">Upload a file (legacy storage)</h3>
   <input id="file" type="file">
   <div class="actions"><button id="upload" class="btn">Upload</button></div>
   <div id="status"></div>
-</div>
-
-<div class="card">
-  <h3 style="margin-top:0">Your files</h3>
   <table><tbody id="list"><tr><td class="muted">Loading…</td></tr></tbody></table>
 </div>
 
+<style>
+  .inline { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
+  .inline input[type=text] { flex:1; min-width:160px; }
+  .check { color:#e6edf3; font-size:.85rem; margin:0; }
+  .secret { border:1px solid #d29922; border-radius:8px; padding:.75rem; margin:.75rem 0; }
+  .secret code { word-break:break-all; color:#e6edf3; }
+  .error { color:#f85149; }
+  .ok { color:#3fb950; }
+</style>
+
 <script>
   const $ = (id) => document.getElementById(id);
-  function say(msg, cls) { const s = $("status"); s.textContent = msg; s.className = cls || ""; }
-  async function readError(r) {
-    try { return (await r.json()).error || r.statusText; } catch (e) { return r.statusText; }
-  }
-  async function load() {
-    const r = await fetch("/api/files");
-    const tbody = $("list");
+  const CSRF = document.querySelector('meta[name="csrf-token"]').content;
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+  function say(el, msg, cls) { el.textContent = msg; el.className = cls || "muted"; }
+
+  async function api(method, url, body) {
+    const opts = { method, headers: {}, credentials: "same-origin" };
+    if (method !== "GET") opts.headers["X-CSRF-Token"] = CSRF;
+    if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+    const r = await fetch(url, opts);
+    let j = null; try { j = await r.json(); } catch (e) {}
     if (!r.ok) {
-      tbody.innerHTML = "";
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.className = "error"; td.textContent = await readError(r);
-      tr.append(td); tbody.append(tr);
-      return;
+      const msg = (j && j.error && j.error.message) || r.statusText;
+      const err = new Error(msg); err.status = r.status; throw err;
     }
+    return j;
+  }
+
+  // ----- apps
+  let currentApp = null;
+  async function loadApps() {
+    const tbody = $("apps");
+    try {
+      const { data } = await api("GET", "/api/v1/apps");
+      if (!data.apps.length) { tbody.innerHTML = '<tr><td class="muted">No apps yet. Create one above.</td></tr>'; return; }
+      tbody.innerHTML = data.apps.map(a =>
+        `<tr><td>${esc(a.name)}<div class="muted">${esc(a.id)}</div></td>
+         <td style="text-align:right"><button class="btn secondary small" data-app="${esc(a.id)}" data-name="${esc(a.name)}">Manage keys</button></td></tr>`).join("");
+      tbody.querySelectorAll("button[data-app]").forEach(b => b.onclick = () => openApp(b.dataset.app, b.dataset.name));
+    } catch (e) {
+      tbody.innerHTML = `<tr><td class="error">${esc(e.message)}</td></tr>`;
+    }
+  }
+
+  $("new-app").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const name = $("app-name").value.trim();
+    try {
+      await api("POST", "/api/v1/apps", { name });
+      $("app-name").value = "";
+      say($("app-status"), "App created.", "ok");
+      loadApps();
+    } catch (e) { say($("app-status"), e.message, "error"); }
+  };
+
+  async function openApp(id, name) {
+    currentApp = id;
+    $("keys-card").hidden = false;
+    $("keys-app").textContent = name;
+    $("new-secret").hidden = true;
+    loadKeys();
+  }
+
+  async function loadKeys() {
+    const tbody = $("keys");
+    try {
+      const { data } = await api("GET", `/api/v1/apps/${encodeURIComponent(currentApp)}/keys`);
+      if (!data.keys.length) { tbody.innerHTML = '<tr><td class="muted">No keys yet.</td></tr>'; return; }
+      tbody.innerHTML = data.keys.map(k => {
+        const state = k.revoked_at ? "revoked" : "active";
+        const revoke = k.revoked_at ? "" : `<button class="btn danger small" data-key="${esc(k.id)}">Revoke</button>`;
+        return `<tr><td>${esc(k.name)}<div class="muted">${esc(k.environment)} · ${esc(k.scopes.join(", "))} · ${state}</div></td>
+                <td style="text-align:right">${revoke}</td></tr>`;
+      }).join("");
+      tbody.querySelectorAll("button[data-key]").forEach(b => b.onclick = () => revokeKey(b.dataset.key));
+    } catch (e) { tbody.innerHTML = `<tr><td class="error">${esc(e.message)}</td></tr>`; }
+  }
+
+  $("new-key").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const scopes = [...document.querySelectorAll('input[name="scope"]:checked')].map(i => i.value);
+    try {
+      const { data } = await api("POST", `/api/v1/apps/${encodeURIComponent(currentApp)}/keys`,
+        { name: $("key-name").value.trim(), environment: $("key-env").value, scopes });
+      $("secret-value").textContent = data.key.api_key;
+      $("new-secret").hidden = false;
+      $("key-name").value = "";
+      loadKeys();
+    } catch (e) { alert(e.message); }
+  };
+
+  async function revokeKey(kid) {
+    if (!confirm("Revoke this key? Requests using it will stop working.")) return;
+    try { await api("DELETE", `/api/v1/apps/${encodeURIComponent(currentApp)}/keys/${encodeURIComponent(kid)}`); loadKeys(); }
+    catch (e) { alert(e.message); }
+  }
+
+  // ----- legacy file list
+  async function loadFiles() {
+    const tbody = $("list");
+    const r = await fetch("/api/files", { credentials: "same-origin" });
+    if (!r.ok) { tbody.innerHTML = `<tr><td class="error">Could not load files.</td></tr>`; return; }
     const { files } = await r.json();
-    tbody.innerHTML = "";
     if (!files.length) { tbody.innerHTML = '<tr><td class="muted">No files yet.</td></tr>'; return; }
-    for (const f of files) {
-      const tr = document.createElement("tr");
-      const name = document.createElement("td"); name.textContent = f.name;
-      const size = document.createElement("td"); size.className = "muted"; size.textContent = f.size + " bytes";
-      const acts = document.createElement("td"); acts.style.textAlign = "right";
-      const dl = document.createElement("button"); dl.className = "btn secondary small"; dl.textContent = "Download";
-      dl.onclick = () => download(f.name);
-      const rm = document.createElement("button"); rm.className = "btn danger small"; rm.textContent = "Delete";
-      rm.onclick = () => remove(f.name);
-      acts.append(dl, rm);
-      tr.append(name, size, acts);
-      tbody.append(tr);
-    }
+    tbody.innerHTML = files.map(f =>
+      `<tr><td>${esc(f.name)}</td><td style="text-align:right">
+        <button class="btn secondary small" data-dl="${esc(f.name)}">Download</button>
+        <button class="btn danger small" data-rm="${esc(f.name)}">Delete</button></td></tr>`).join("");
+    tbody.querySelectorAll("button[data-dl]").forEach(b => b.onclick = () => download(b.dataset.dl));
+    tbody.querySelectorAll("button[data-rm]").forEach(b => b.onclick = () => removeFile(b.dataset.rm));
   }
   async function download(name) {
-    const r = await fetch("/api/files/" + encodeURIComponent(name));
-    if (!r.ok) return say(await readError(r), "error");
+    const r = await fetch("/api/files/" + encodeURIComponent(name), { credentials: "same-origin" });
+    if (!r.ok) return alert("Download failed.");
     const url = URL.createObjectURL(await r.blob());
     const a = Object.assign(document.createElement("a"), { href: url, download: name });
     a.click(); URL.revokeObjectURL(url);
   }
-  async function remove(name) {
+  async function removeFile(name) {
     if (!confirm("Delete " + name + "?")) return;
-    const r = await fetch("/api/files/" + encodeURIComponent(name), { method: "DELETE" });
-    if (!r.ok) return say(await readError(r), "error");
-    say("Deleted " + name, "ok"); load();
+    const r = await fetch("/api/files/" + encodeURIComponent(name), { method: "DELETE", headers: { "X-CSRF-Token": CSRF }, credentials: "same-origin" });
+    if (!r.ok) return alert("Delete failed.");
+    loadFiles();
   }
   $("upload").onclick = async () => {
     const f = $("file").files[0];
-    if (!f) return say("Choose a file first.", "error");
+    if (!f) return say($("status"), "Choose a file first.", "error");
     const fd = new FormData(); fd.append("file", f, f.name);
-    const r = await fetch("/api/files", { method: "POST", body: fd });
-    if (!r.ok) return say(await readError(r), "error");
-    say("Uploaded " + f.name, "ok"); $("file").value = ""; load();
+    const r = await fetch("/api/files", { method: "POST", headers: { "X-CSRF-Token": CSRF }, body: fd, credentials: "same-origin" });
+    if (!r.ok) return say($("status"), "Upload failed.", "error");
+    say($("status"), "Uploaded " + f.name, "ok"); $("file").value = ""; loadFiles();
   };
-  load();
+
+  loadApps();
+  loadFiles();
 </script>
 {% endblock %}

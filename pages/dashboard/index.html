@@ -22,15 +22,13 @@
 <body>
   <div class="card">
     <h1>Dashboard</h1>
-    <p>Upload, list, download, and delete your files. The dashboard runs on the app server and needs you to be logged in.</p>
-    <a class="btn" id="open" href="__APP_URL__/dashboard">Open dashboard</a>
-    <p>Not logged in? <a href="../login/">Log in</a> · <a href="../">Home</a></p>
+    <p>Your apps, API keys, database, and files are on the app server. You must be logged in there.</p><div class="actions"><a class="btn" data-app href="__APP_URL__/dashboard">Open dashboard</a><a class="btn secondary" href="../login/">Log in</a></div><p><a href="../">Home</a></p>
     <p class="note" id="note"></p>
   </div>
   <script>
+    // Forms and sessions live on the app server (cookies are tied to it). This page only links there.
     if (!"__APP_URL__") {
-      const a = document.getElementById("open");
-      a.removeAttribute("href"); a.setAttribute("aria-disabled", "true");
+      document.querySelectorAll("a[data-app]").forEach(a => { a.removeAttribute("href"); a.setAttribute("aria-disabled", "true"); });
       document.getElementById("note").textContent = "The dashboard is not available yet: the app server is not configured (APP_URL).";
     }
   </script>
