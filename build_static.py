@@ -4,6 +4,7 @@ GitHub Pages cannot run Python at request time, so the API is generated at
 build time into _site/api/*.json (served at /api/<name>.json on Pages).
 """
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -37,6 +38,12 @@ def main() -> None:
     index = SITE / "api" / "index.json"
     index.write_text(json.dumps({"endpoints": sorted(ROUTES.values())}, indent=2) + "\n")
     print(f"wrote {index}")
+
+    # Home page. APP_URL (e.g. the public URL of the Flask app) is injected at build time.
+    app_url = os.environ.get("APP_URL", "").strip().rstrip("/")
+    html = (Path("pages") / "index.html").read_text().replace("__APP_URL__", app_url)
+    (SITE / "index.html").write_text(html)
+    print(f"wrote {SITE / 'index.html'} (APP_URL {'set' if app_url else 'not set'})")
 
     # Stop GitHub from running Jekyll over the output.
     (SITE / ".nojekyll").touch()

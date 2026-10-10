@@ -24,6 +24,8 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt
       - run: python build_static.py
+        env:
+          APP_URL: ${{ vars.APP_URL }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
