@@ -93,6 +93,8 @@ The raw share token and upload-link token are kept in the owner's manifest so th
 5. **Store.** The release is created, then the asset is uploaded to it.
 6. **Mark ready.** The entry becomes `ready` in the manifest. The temp file is deleted.
 
+Piece-by-piece uploads run the same steps, with two extra stages. Each piece is written to the temp directory under a per-session lock, and it counts as received only once its `.sha256` file exists (that file is written last). A repeated identical piece is a no-op, and different bytes for the same piece are refused with `CHUNK_CONFLICT`. Completion joins the pieces, checks each piece's hash again, and then runs the same checks and the same `FileService.upload` step as a whole-file upload. Because `FileService.upload` is idempotent on the upload id, a repeated completion returns the stored file. A completed session keeps only a small record, so a repeat can be answered after its pieces are removed.
+
 If step 5 fails, the reservation is removed or left `failed` and cleaned up later. Writes are never retried automatically; a conflict returns `409`. This keeps the manifest consistent without a database.
 
 ## How sharing works
@@ -106,6 +108,15 @@ If step 5 fails, the reservation is removed or left `failed` and cleaned up late
 ## How upload links work
 
 The same token pattern is used for `/u/<token>`. The owner's manifest holds the link (`uploadLinks`). Each file that comes through a link records `linkId`, and the limits per link count files with that `linkId`. Revoking sets `revokedAt` and removes the index. The public upload route checks the link under the same manifest lock as every other reservation, so a revoke and an upload cannot both succeed.
+
+## How URL import works
+
+1. **Start.** The request is checked (session, `X-Requested-With`, Origin, rate limit) and the link is validated: `https://` only, port 443, no user name or password, no IP literal, a host name that is not on the blocked list, at most 2048 characters. A job is recorded under `owner:uploadId` before any network work starts, so two identical requests at the same moment start one download.
+2. **Resolve.** Every address the host name resolves to must be public. One private address refuses the whole name. The connection is made to an address that was already checked, so a second DNS lookup cannot point it somewhere else.
+3. **Download.** Only a few headers are sent. Redirects are followed up to three times, and each new address is checked again. Connect, silence, and total timeouts stop the job. The body is written to the temp directory and stops at the 25 MB cap.
+4. **Store.** The downloaded file goes through the same checks and `FileService.upload` as an upload from the dashboard. The temp file is deleted however the job ends.
+
+Jobs are kept in memory. Only the owner can see or cancel a job. Logs and stored records hold no link, host, or path, and names are masked.
 
 ## Security model
 
@@ -149,4 +160,6 @@ This matters because the repository is public, so GitHub Actions logs are public
 - **PDF and media playback** in the preview depend on the browser's built-in viewer and are not checked in automated tests.
 - **Cross-origin browser clients cannot make changes.** CORS allows only `Content-Type` (see [API reference](api.md#headers-and-rules)).
 - **Broad token.** The GitHub token used by the workflow is a classic personal access token with broad scopes. Replace it with a fine-grained token limited to the two repos.
+- **URL imports are in memory.** A restart stops running imports, and the browser's list of them is lost on reload. Files that finished are still in the file list.
+- **Pieces need a disk that survives restarts** to resume after one. Set `FILE_TEMP_DIR` to a persistent path. Without it, pieces go to the OS temp directory.
 - **No antivirus scanning.** Stored files are not scanned. Downloads are forced to attachments for unknown types, which limits the risk.
