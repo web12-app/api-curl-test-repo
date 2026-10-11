@@ -42,7 +42,7 @@ test('the allowlist has no active content', () => {
 test('each allowed type has a mime type and a category', () => {
   for (const ext of ALLOWED_EXTENSIONS) {
     assert.match(TYPES[ext].mime, /^[a-z]+\/[a-z0-9.+-]+/, ext);
-    assert.ok(['image', 'document', 'archive'].includes(TYPES[ext].category), ext);
+    assert.ok(['image', 'document', 'archive', 'video', 'audio'].includes(TYPES[ext].category), ext);
   }
 });
 

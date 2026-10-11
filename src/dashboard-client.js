@@ -8,13 +8,17 @@ function dashboardClient() {
   if (!root || root.getAttribute('data-enabled') !== '1') return;
 
   var MAX_BYTES = Number(root.getAttribute('data-max-bytes')) || 0;
-  var ALLOWED = (root.getAttribute('data-allowed') || '').split(',').filter(Boolean);
   var table = document.getElementById('files');
   var tbody = table.querySelector('tbody');
   var statusEl = document.getElementById('files-status');
   var notices = document.getElementById('notices');
   var queue = document.getElementById('queue');
   var quotaEl = document.getElementById('quota');
+  var linkForm = document.getElementById('link-form');
+  var linkLabel = document.getElementById('link-label');
+  var linkResult = document.getElementById('link-result');
+  var linkStatus = document.getElementById('links-status');
+  var linkRows = document.getElementById('links');
   var search = document.getElementById('search');
   var category = document.getElementById('category');
   var picker = document.getElementById('picker');
@@ -93,8 +97,9 @@ function dashboardClient() {
     return (err && err.message) || ('Request failed (' + result.status + ').');
   }
 
+  // Only the file count is shown. There is no storage total.
   function renderQuota(q) {
-    quotaEl.textContent = fmtSize(q.usedBytes) + ' used · ' + q.count + ' of ' + q.maxFiles + ' files';
+    quotaEl.textContent = q.count + ' of ' + q.maxFiles + ' files';
   }
 
   function deleteButton(file) {
@@ -105,14 +110,6 @@ function dashboardClient() {
       'aria-label': 'Delete ' + file.name,
       onclick: function () { removeFile(file); },
     });
-  }
-
-  // Preview covers the same types the server allows inline. The server checks again; this only avoids a
-  // pointless request.
-  var PREVIEW_EXT = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.txt', '.csv', '.json'];
-  function canPreview(name) {
-    var dot = name.lastIndexOf('.');
-    return dot >= 0 && PREVIEW_EXT.indexOf(name.slice(dot).toLowerCase()) !== -1;
   }
 
   function openPreview(file) {
@@ -171,9 +168,10 @@ function dashboardClient() {
     files.forEach(function (file) {
       var nameCell = el('td', { 'data-label': 'Name' }, [file.name]);
       nameCell.appendChild(el('span', { className: 'badge' + (file.visibility === 'public' ? ' public' : ''), text: file.visibility === 'public' ? 'Public' : 'Private' }));
+      if (file.viaLink) nameCell.appendChild(el('span', { className: 'badge', text: 'From upload link' }));
       if (file.status === 'deleting') nameCell.appendChild(el('span', { className: 'badge', text: 'Deleting…' }));
       var buttons = [];
-      if (canPreview(file.name)) {
+      if (file.previewable) {
         buttons.push(el('button', { type: 'button', text: 'Preview', 'aria-label': 'Preview ' + file.name, onclick: function () { openPreview(file); } }));
       }
       buttons.push(el('a', { className: 'button', href: '/api/files/' + file.id + '/download', download: file.name, text: 'Download' }));
@@ -230,9 +228,6 @@ function dashboardClient() {
       return 'Too large. The limit is ' + fmtSize(MAX_BYTES) + '.';
     }
     if (file.size === 0) return 'The file is empty.';
-    var dot = file.name.lastIndexOf('.');
-    var ext = dot >= 0 ? file.name.slice(dot).toLowerCase() : '';
-    if (ALLOWED.indexOf(ext) === -1) return 'This file type is not allowed.';
     return null;
   }
 
@@ -318,6 +313,84 @@ function dashboardClient() {
     loadFiles();
   }
 
+  // ---- upload links. The server returns the path only; the full link is built from this page's origin.
+
+  function linkBox(link) {
+    var url = window.location.origin + link.uploadPath;
+    var input = el('input', { type: 'text', readonly: 'readonly', 'aria-label': 'Upload link' + (link.label ? ' for ' + link.label : '') });
+    input.value = url;
+    return el('div', { className: 'share-box' }, [
+      input,
+      el('button', { type: 'button', text: 'Copy link', onclick: function () { copyText(url, input); } }),
+    ]);
+  }
+
+  function renderLinks(links) {
+    linkRows.querySelector('tbody').textContent = '';
+    links.forEach(function (link) {
+      var buttons = [];
+      if (link.active) {
+        buttons.push(el('button', {
+          type: 'button',
+          className: 'danger',
+          text: 'Revoke',
+          'aria-label': 'Revoke upload link' + (link.label ? ' ' + link.label : ''),
+          onclick: function () { revokeLink(link); },
+        }));
+      }
+      var actionsCell = el('td', { 'data-label': 'Actions', className: 'actions' }, [el('div', { className: 'stack' }, buttons)]);
+      if (link.active) actionsCell.appendChild(linkBox(link));
+      var row = el('tr', null, [
+        el('td', { 'data-label': 'Label', text: link.label || '(no label)' }),
+        el('td', { 'data-label': 'Status' }, [el('span', { className: 'badge' + (link.active ? ' public' : ''), text: link.active ? 'Open' : 'Revoked' })]),
+        el('td', { 'data-label': 'Uploads', text: link.uploads + ' file(s) · ' + fmtSize(link.usedBytes) }),
+        el('td', { 'data-label': 'Created', text: fmtDate(link.createdAt) }),
+        actionsCell,
+      ]);
+      linkRows.querySelector('tbody').appendChild(row);
+    });
+  }
+
+  async function loadLinks() {
+    var result = await api('/api/upload-links');
+    if (!result.ok) {
+      linkStatus.className = 'error';
+      linkStatus.textContent = 'Could not load upload links. ' + messageOf(result);
+      return;
+    }
+    linkStatus.className = '';
+    var links = result.body.data.links;
+    linkStatus.textContent = links.length ? '' : 'No upload links yet.';
+    renderLinks(links);
+  }
+
+  async function revokeLink(link) {
+    if (!window.confirm('Revoke this upload link? Anyone with it will no longer be able to upload. Files already uploaded stay.')) return;
+    var result = await api('/api/upload-links/' + link.id, { method: 'DELETE' });
+    if (result.ok) notify('success', 'Upload link revoked.');
+    else notify('error', 'Could not revoke the link: ' + messageOf(result), result.status === 401);
+    linkResult.textContent = '';
+    loadLinks();
+  }
+
+  linkForm.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var result = await api('/api/upload-links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: linkLabel.value.trim() }),
+    });
+    if (!result.ok) {
+      notify('error', 'Could not create the link: ' + messageOf(result), result.status === 401);
+      return;
+    }
+    linkResult.textContent = '';
+    linkResult.appendChild(el('p', { text: 'Link created. Anyone with this link can upload files to your account. Copy it now, and revoke it when you are done.' }));
+    linkResult.appendChild(linkBox(result.body.data.link));
+    linkLabel.value = '';
+    loadLinks();
+  });
+
   // ---- wiring
 
   pickBtn.addEventListener('click', function () { picker.click(); });
@@ -348,6 +421,7 @@ function dashboardClient() {
   preview.addEventListener('close', function () { document.getElementById('preview-frame').setAttribute('src', 'about:blank'); });
 
   loadFiles();
+  loadLinks();
 }
 
 module.exports = { dashboardClient };

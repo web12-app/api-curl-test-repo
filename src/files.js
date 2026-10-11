@@ -13,7 +13,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { AppError, ConflictError } = require('./errors');
-const { manifestPath, sharePath } = require('./paths');
+const { manifestPath, sharePath, uploadLinkPath } = require('./paths');
+const { maskName, ref } = require('./redact');
+const { isPreviewable } = require('./file-types');
 const { GitHubError } = require('./github-releases');
 
 const MB = 1024 * 1024;
@@ -22,6 +24,9 @@ const DEFAULT_LIMITS = {
   // There is no total storage quota. The per-user file count below keeps the manifest small enough to read in one request.
   maxFiles: 200,
   maxConcurrentUploads: 4, // the server keeps uploads on disk while they are checked
+  linkMaxFiles: 20, // per upload link: files it may bring in
+  linkMaxBytes: 500 * MB, // per upload link: total bytes it may bring in
+  maxLinks: 20, // active upload links per user
 };
 const PENDING_STALE_MS = 15 * 60 * 1000;
 const UPLOAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -46,11 +51,26 @@ function publicFile(entry) {
     status: entry.status === 'deleting' ? 'deleting' : 'ready',
     visibility: isPublic ? 'public' : 'private',
     sharePath: isPublic ? `/s/${entry.shareToken}` : null,
+    viaLink: Boolean(entry.linkId),
+    previewable: isPreviewable(entry.name),
   };
 }
 
 const newShareToken = () => crypto.randomBytes(SHARE_TOKEN_BYTES).toString('base64url');
 const shareHashOf = (token) => crypto.createHash('sha256').update(token).digest('hex');
+
+// Owner's view of an upload link. The path appears only while the link is open.
+function publicLink(link) {
+  const open = !link.revokedAt;
+  return {
+    id: link.id,
+    label: link.label,
+    createdAt: link.createdAt,
+    revokedAt: link.revokedAt || null,
+    active: open,
+    uploadPath: open ? `/u/${link.token}` : null,
+  };
+}
 
 function usage(files) {
   const counted = files.filter((f) => COUNTED.has(f.status));
@@ -173,7 +193,7 @@ class FileService {
 
   // Stores one file. `input` holds the validated name and type and the path of the temp file on disk.
   // Returns { file, duplicate }. A repeat of an upload that already finished returns it with duplicate: true.
-  async upload(uid, { uploadId, tmpPath, size, name, spec, ext }) {
+  async upload(uid, { uploadId, tmpPath, size, name, spec, ext, linkId = null }) {
     if (!UPLOAD_ID_RE.test(uploadId)) throw new AppError(400, 'INVALID_UPLOAD_ID', 'The upload id must be a UUID.');
     if (this.inflight >= this.limits.maxConcurrentUploads) {
       throw new AppError(503, 'BUSY', 'Too many uploads are running. Try again in a moment.');
@@ -198,6 +218,18 @@ class FileService {
         if (used.count >= this.limits.maxFiles) {
           throw new AppError(507, 'FILE_LIMIT_REACHED', `You can keep up to ${this.limits.maxFiles} files.`);
         }
+        if (linkId) {
+          // The link must still be open. Its own limits count only the files it brought in.
+          const link = m.uploadLinks && m.uploadLinks.find((l) => l.id === linkId);
+          if (!link || link.revokedAt) throw new AppError(404, 'UPLOAD_LINK_CLOSED', 'This upload link is no longer active.');
+          const via = m.files.filter((f) => f.linkId === linkId && COUNTED.has(f.status));
+          if (via.length >= this.limits.linkMaxFiles) {
+            throw new AppError(507, 'LINK_FILE_LIMIT', 'This upload link has reached its file limit.');
+          }
+          if (via.reduce((sum, f) => sum + f.size, 0) + size > this.limits.linkMaxBytes) {
+            throw new AppError(507, 'LINK_SIZE_LIMIT', 'This upload link has reached its size limit.');
+          }
+        }
         const id = crypto.randomBytes(16).toString('hex');
         const entry = {
           id,
@@ -212,6 +244,7 @@ class FileService {
           reservedAt: this.now(),
           tag: `upload-${id}`,
           assetId: null,
+          linkId: linkId || null,
         };
         m.files.push(entry);
         return { save: true, value: { entry, duplicate: false } };
@@ -242,6 +275,8 @@ class FileService {
           e.readyAt = iso(this.now());
           return { save: true, value: e };
         });
+        // Logged in masked form only (see redact.js). The owner's id, the file id, and the link appear as references.
+        console.log(`upload stored: file=${maskName(name)} id=${ref(entry.id)} owner=${ref(uid)}${linkId ? ` link=${ref(linkId)}` : ''}`);
         return { file: publicFile(ready), duplicate: false };
       } catch (err) {
         // The file is stored but the record is not. The record stays pending and is cleaned up after 15 minutes.
@@ -272,6 +307,62 @@ class FileService {
     } catch (err) {
       console.error(`Failed upload ${fileId} could not be recorded: ${err && err.name}`);
     }
+  }
+
+  async createUploadLink(uid, label) {
+    await this.assertReady();
+    return this.withManifest(uid, async (m) => {
+      m.uploadLinks = m.uploadLinks || [];
+      if (m.uploadLinks.filter((l) => !l.revokedAt).length >= this.limits.maxLinks) {
+        throw new AppError(409, 'TOO_MANY_LINKS', `You can have up to ${this.limits.maxLinks} active upload links. Revoke one first.`);
+      }
+      const token = newShareToken();
+      const hash = shareHashOf(token);
+      const id = crypto.randomBytes(16).toString('hex');
+      // The index is written before the manifest names the link, as with share links.
+      const made = await this.storage.createJson(uploadLinkPath(hash), { uid, linkId: id }, 'Create upload link index');
+      if (made === 'exists') throw new ConflictError('The upload link collided. Try again.');
+      const link = { id, label, createdAt: iso(this.now()), revokedAt: null, tokenHash: hash, token };
+      m.uploadLinks.push(link);
+      console.log(`upload link created: link=${ref(id)} owner=${ref(uid)}`);
+      return { save: true, value: publicLink(link) };
+    });
+  }
+
+  async listUploadLinks(uid) {
+    const stored = await this.storage.readJson(manifestPath(uid));
+    const m = stored ? stored.data : { files: [], uploadLinks: [] };
+    return (m.uploadLinks || []).map((link) => {
+      const via = (m.files || []).filter((f) => f.linkId === link.id && f.status === 'ready');
+      return { ...publicLink(link), uploads: via.length, usedBytes: via.reduce((sum, f) => sum + f.size, 0) };
+    });
+  }
+
+  async revokeUploadLink(uid, linkId) {
+    if (!FILE_ID_RE.test(linkId)) throw new AppError(404, 'NOT_FOUND', 'Upload link not found.');
+    let hash = null;
+    const view = await this.withManifest(uid, async (m) => {
+      const link = (m.uploadLinks || []).find((l) => l.id === linkId);
+      if (!link) throw new AppError(404, 'NOT_FOUND', 'Upload link not found.');
+      if (link.revokedAt) return { save: false, value: publicLink(link) };
+      link.revokedAt = iso(this.now());
+      hash = link.tokenHash;
+      console.log(`upload link revoked: link=${ref(linkId)} owner=${ref(uid)}`);
+      return { save: true, value: publicLink(link) };
+    });
+    if (hash) await this.deleteIndex(uploadLinkPath(hash));
+    return view;
+  }
+
+  // Resolves an upload link token. Returns { uid, link } for an open link, or null.
+  async resolveUploadLink(token) {
+    if (!SHARE_TOKEN_RE.test(token)) return null;
+    const hash = shareHashOf(token);
+    const index = await this.storage.readJson(uploadLinkPath(hash));
+    if (!index || !FILE_ID_RE.test(index.data.linkId) || !/^[a-f0-9]{32}$/.test(index.data.uid)) return null;
+    const stored = await this.storage.readJson(manifestPath(index.data.uid));
+    const link = stored && (stored.data.uploadLinks || []).find((l) => l.id === index.data.linkId);
+    return link && !link.revokedAt && link.tokenHash === hash ? { uid: index.data.uid, link } : null;
   }
 
   // Streams a ready entry's bytes. Returns { file, res}. Callers must consume or cancel res.body.
@@ -324,6 +415,7 @@ class FileService {
         e.shareToken = token;
         e.shareHash = hash;
         e.sharedAt = iso(this.now());
+        console.log(`share enabled: file=${maskName(e.name)} id=${ref(fileId)}`);
         return { save: true, value: publicFile(e) };
       }
       if (e.visibility !== 'public' && !e.shareToken) return { save: false, value: publicFile(e) };
@@ -364,11 +456,15 @@ class FileService {
 
   // Best effort. A leftover index does nothing, because the manifest no longer names its hash.
   async deleteShareIndex(hash) {
+    await this.deleteIndex(sharePath(hash));
+  }
+
+  async deleteIndex(indexPath) {
     try {
-      const stored = await this.storage.readJson(sharePath(hash));
-      if (stored) await this.storage.deleteJson(sharePath(hash), stored.sha, 'Remove share link index');
+      const stored = await this.storage.readJson(indexPath);
+      if (stored) await this.storage.deleteJson(indexPath, stored.sha, 'Remove index file');
     } catch (err) {
-      console.error(`Share link index could not be removed: ${err && err.name}`);
+      console.error(`An index file could not be removed: ${err && err.name}`);
     }
   }
 
@@ -406,4 +502,4 @@ class FileService {
   }
 }
 
-module.exports = { FileService, DEFAULT_LIMITS, publicFile, UPLOAD_ID_RE, FILE_ID_RE, SHARE_TOKEN_RE };
+module.exports = { FileService, DEFAULT_LIMITS, publicFile, publicLink, UPLOAD_ID_RE, FILE_ID_RE, SHARE_TOKEN_RE };

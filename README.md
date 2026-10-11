@@ -76,6 +76,9 @@ src/session.js            signed session cookies
 src/rate-limit.js         in-memory limits
 src/github-storage.js     GitHub Contents API client (private data repo)
 src/memory-storage.js     in-memory store for tests
+src/files.js              file records, uploads, sharing, and upload links
+src/file-types.js         known types, content checks, and which types preview inline
+src/redact.js             masked names and short references for logs
 src/pages.js              HTML templates
 test/                     node:test suites
 ```

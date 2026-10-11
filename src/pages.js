@@ -1,6 +1,7 @@
 'use strict';
 
 // Server-rendered HTML. Every value from a request is escaped before it is written.
+const crypto = require('node:crypto');
 const { dashboardClient } = require('./dashboard-client');
 
 const ERROR_TEXT = {
@@ -56,7 +57,6 @@ const DASHBOARD_CSS = `
       .profile { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1rem; align-items: flex-end; }
       .profile h1 { margin: .5rem 0 0; font-size: 1.6rem; }
       .quota { margin: 0; min-width: 14rem; font-size: .9rem; color: #57606a; }
-      .quota progress { width: 100%; }
       h2 { font-size: 1.15rem; margin: 1.5rem 0 .5rem; }
       .drop { border: 2px dashed #8c959f; border-radius: 8px; padding: 1.25rem; text-align: center; background: #f6f8fa; }
       .drop.over { border-color: #0969da; background: #ddf4ff; }
@@ -148,7 +148,7 @@ function authForm({ mode, error }) {
 
 // The dashboard. The file list and uploads are filled in by the script below, from this app's own API.
 // filesEnabled is false when the storage settings are missing: the page then shows a notice and no upload UI.
-function dashboardPage(user, { filesEnabled = false, maxBytes = 0, allowed = [] } = {}) {
+function dashboardPage(user, { filesEnabled = false, maxBytes = 0, linkMaxFiles = 0, linkMaxBytes = 0 } = {}) {
   const name = escapeHtml(user.username);
   if (!filesEnabled) {
     return layout(
@@ -159,7 +159,9 @@ function dashboardPage(user, { filesEnabled = false, maxBytes = 0, allowed = [] 
       { wide: true, extraCss: DASHBOARD_CSS },
     );
   }
-  const config = `<div id="dash-config" data-enabled="1" data-max-bytes="${escapeHtml(maxBytes)}" data-allowed="${escapeHtml(allowed.join(','))}" hidden></div>`;
+  const config = `<div id="dash-config" data-enabled="1" data-max-bytes="${escapeHtml(maxBytes)}" hidden></div>`;
+  const mb = escapeHtml(Math.floor(maxBytes / 1024 / 1024));
+  const linkMb = escapeHtml(Math.floor(linkMaxBytes / 1024 / 1024));
   return layout(
     'Dashboard',
     `<div class="profile">
@@ -176,8 +178,8 @@ function dashboardPage(user, { filesEnabled = false, maxBytes = 0, allowed = [] 
        <div id="drop" class="drop" tabindex="0">
          <p>Drag files here, or</p>
          <button type="button" id="pick">Choose files</button>
-         <input type="file" id="picker" multiple accept="${escapeHtml(allowed.join(','))}" hidden>
-         <p class="hint">Up to ${escapeHtml(Math.floor(maxBytes / 1024 / 1024))} MB per file. Allowed: ${escapeHtml(allowed.join(', '))}.</p>
+         <input type="file" id="picker" multiple hidden>
+         <p class="hint">Any file type, up to ${mb} MB per file. Images, video, audio, PDF, and text can be previewed. Other types download as files.</p>
        </div>
        <ul id="queue" class="queue" aria-label="Uploads"></ul>
      </section>
@@ -194,6 +196,9 @@ function dashboardPage(user, { filesEnabled = false, maxBytes = 0, allowed = [] 
              <option value="image">Images</option>
              <option value="document">Documents</option>
              <option value="archive">Archives</option>
+             <option value="video">Video</option>
+             <option value="audio">Audio</option>
+             <option value="other">Other</option>
            </select>
          </label>
        </div>
@@ -212,10 +217,58 @@ function dashboardPage(user, { filesEnabled = false, maxBytes = 0, allowed = [] 
        </div>
        <iframe id="preview-frame" title="File preview"></iframe>
      </dialog>
+
+     <section aria-labelledby="links-title">
+       <h2 id="links-title">Upload links</h2>
+       <p class="hint">Anyone with a link can upload one file at a time to your account, with no login. Revoke a link when you no longer want it to work. Each link accepts up to ${escapeHtml(linkMaxFiles)} files and ${linkMb} MB in total. Files uploaded through a link count toward your file limit.</p>
+       <form id="link-form" class="toolbar">
+         <label>Label (optional)
+           <input type="text" id="link-label" maxlength="60" autocomplete="off">
+         </label>
+         <div><button type="submit" id="link-create">Create upload link</button></div>
+       </form>
+       <div id="link-result" role="status"></div>
+       <p id="links-status" role="status"></p>
+       <table id="links" class="files">
+         <thead>
+           <tr><th>Label</th><th>Status</th><th>Uploads</th><th>Created</th><th><span class="sr">Actions</span></th></tr>
+         </thead>
+         <tbody></tbody>
+       </table>
+     </section>
      ${config}
      <script>(${dashboardClient.toString()})();</script>`,
     user,
     { wide: true, extraCss: DASHBOARD_CSS },
+  );
+}
+
+// Public page for an upload link. A plain multipart form: no script, no cookie. The hidden uploadId is a fresh
+// UUID per page load, so a repeated submit of this page is stored once.
+function uploadPage({ label, token, maxBytes }) {
+  const t = escapeHtml(token);
+  const mb = escapeHtml(Math.floor(maxBytes / 1024 / 1024));
+  return layout(
+    'Upload a file',
+    `<h1>Upload a file</h1>
+     ${label ? `<p>Upload link: <strong>${escapeHtml(label)}</strong></p>` : ''}
+     <p>Choose one file to send. Any file type is accepted, up to ${mb} MB. You do not need an account.</p>
+     <form method="post" enctype="multipart/form-data" action="/u/${t}/upload">
+       <label>File <input type="file" name="file" required></label>
+       <input type="hidden" name="uploadId" value="${escapeHtml(crypto.randomUUID())}">
+       <button type="submit">Upload</button>
+     </form>`,
+    null,
+  );
+}
+
+function uploadDonePage({ name, token }) {
+  return layout(
+    'Uploaded',
+    `<h1>Uploaded</h1>
+     <p><strong>${escapeHtml(name)}</strong> was stored.</p>
+     <p><a href="/u/${escapeHtml(token)}">Upload another file</a></p>`,
+    null,
   );
 }
 
@@ -242,4 +295,4 @@ function errorPage(status, message, user = null) {
   return layout(`Error ${status}`, `<h1>Error ${status}</h1><p class="error">${escapeHtml(message)}</p>`, user);
 }
 
-module.exports = { escapeHtml, errorText, homePage, authForm, dashboardPage, sharePage, errorPage };
+module.exports = { escapeHtml, errorText, homePage, authForm, dashboardPage, sharePage, uploadPage, uploadDonePage, errorPage };
