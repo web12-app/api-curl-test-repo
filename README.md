@@ -77,9 +77,4 @@ src/github-storage.js     GitHub Contents API client (private data repo)
 src/memory-storage.js     in-memory store for tests
 src/pages.js              HTML templates
 test/                     node:test suites
-.github/workflows/        CI: Azure Web App build, test, and deploy
 ```
-
-## Azure Web App deployment
-
-Pushes to `main` build, test, and deploy this app to Azure App Service through `.github/workflows/azure-webapp-deploy.yml`. Deploy runs only when the build and tests pass. It needs the repository variable `AZURE_WEBAPP_NAME` and the secret `AZURE_WEBAPP_PUBLISH_PROFILE`. Setup, app settings, and troubleshooting are in [docs/azure-deployment.md](docs/azure-deployment.md).
