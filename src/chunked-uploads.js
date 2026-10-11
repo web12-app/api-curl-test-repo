@@ -32,10 +32,10 @@ const COMPLETING_STALE_MS = 10 * 60 * 1000; // a completion that never finished 
 const SWEEP_EVERY_MS = 10 * 60 * 1000;
 
 const CHUNK_LIMITS = {
-  chunkBytes: 2 * MB, // default piece size
+  chunkBytes: 8 * MB, // default piece size (the largest allowed; big files finish faster)
   minChunkBytes: 256 * 1024,
   maxChunkBytes: 8 * MB,
-  maxChunks: 400,
+  maxChunks: 512, // 512 pieces x 8 MiB is well above the 2 GiB asset ceiling
   sessionMs: 24 * 60 * 60 * 1000, // a session lives at most this long
   sessionIdleMs: 2 * 60 * 60 * 1000, // and is dropped after this long without a new piece
   maxSessionsPerUser: 3, // open at once

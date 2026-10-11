@@ -4,7 +4,7 @@ All JSON routes return one of two shapes:
 
 ```json
 { "success": true,  "data": { } }
-{ "success": false, "error": { "code": "FILE_TOO_LARGE", "message": "Files must be 25 MB or smaller." } }
+{ "success": false, "error": { "code": "FILE_TOO_LARGE", "message": "Files must be 2048 MB or smaller." } }
 ```
 
 Clients should branch on `error.code`, not on `message`, which may change.
@@ -87,7 +87,7 @@ Response `200`:
 
 Response `201` (or `200` for a repeat) with `data.file`, the same shape as list items.
 
-Errors: `400 INVALID_UPLOAD_ID`, `400 INVALID_FILENAME`, `400 EMPTY_FILE`, `400 FILE_REQUIRED`, `400 INVALID_MULTIPART`, `400 TOO_MANY_PARTS`, `400 TOO_MANY_FILES`, `400 UPLOAD_INTERRUPTED`, `413 FILE_TOO_LARGE` (over 25 MB; refused before the body is read when `Content-Length` says so, otherwise while streaming), `415 UNSUPPORTED_MEDIA_TYPE` (not multipart), `415 FILE_CONTENT_MISMATCH`, `409 UPLOAD_ID_USED`, `409 UPLOAD_IN_PROGRESS`, `507 FILE_LIMIT_REACHED` (200 files), `429 RATE_LIMITED` (60 per hour), `429 TOO_MANY_UPLOADS` (4 at once), `503 BUSY`, `503 UPSTREAM_ERROR`.
+Errors: `400 INVALID_UPLOAD_ID`, `400 INVALID_FILENAME`, `400 EMPTY_FILE`, `400 FILE_REQUIRED`, `400 INVALID_MULTIPART`, `400 TOO_MANY_PARTS`, `400 TOO_MANY_FILES`, `400 UPLOAD_INTERRUPTED`, `413 FILE_TOO_LARGE` (over 2 GB, GitHub's asset ceiling; refused before the body is read when `Content-Length` says so, otherwise while streaming), `415 UNSUPPORTED_MEDIA_TYPE` (not multipart), `415 FILE_CONTENT_MISMATCH`, `409 UPLOAD_ID_USED`, `409 UPLOAD_IN_PROGRESS`, `507 FILE_LIMIT_REACHED` (only when a file-count limit is configured; there is none by default), `429 RATE_LIMITED` (60 per hour), `429 TOO_MANY_UPLOADS` (4 at once), `503 BUSY`, `503 UPSTREAM_ERROR`.
 
 Example with curl:
 
@@ -99,7 +99,7 @@ curl -b cookies.txt -H 'X-Requested-With: fetch' -H 'Origin: http://localhost:30
 
 ### Piece-by-piece upload (large files)
 
-The browser sends files of 4 MB or more in pieces, so an interrupted upload can resume. The same flow works for any client. Each piece is checked with its own SHA-256, and the whole file is checked again when it is joined. The same 25 MB cap applies.
+The browser sends files of 4 MB or more in pieces, so an interrupted upload can resume. The same flow works for any client. Each piece is checked with its own SHA-256, and the whole file is checked again when it is joined. The same 2 GB ceiling applies.
 
 | Method and path | Body | Result |
 | --- | --- | --- |
