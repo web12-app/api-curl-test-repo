@@ -1,10 +1,13 @@
 'use strict';
 
-// Rules for fetching a file from a URL on the server. Everything here exists to stop the server from being used to
-// reach its own network: loopback, private ranges, link-local and cloud metadata addresses, and internal names.
+// Rules for fetching a file from a URL on the server. Any http:// or https:// link of any shape is accepted: any
+// port, IP addresses, host names, and user name and password for basic auth. data: links are accepted too; the
+// bytes travel inside the link itself. What remains restricted is WHERE the server may connect:
 //
-// - Only https:// on port 443, with no credentials, to a public host name. IP literals are refused outright.
-// - Every address a name resolves to must be public. One private address refuses the whole name.
+// - Loopback, private ranges, link-local and cloud metadata addresses, and internal names are refused, so the
+//   server cannot be used to reach its own network. IMPORT_ALLOW_PRIVATE=1 turns that guard off (for importing
+//   from an internal server on purpose).
+// - Every address a name resolves to must pass the same check. One blocked address refuses the whole name.
 // - The connection uses the addresses that were checked (pinnedLookup). It never resolves the name a second time,
 //   so a DNS answer cannot change between the check and the connection (DNS rebinding).
 const dns = require('node:dns');
@@ -16,6 +19,9 @@ const BLOCKED_NAME_RE = /(^|\.)(localhost|localdomain|local|internal|intranet|la
 const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 const blocked = (message) => new AppError(400, 'IMPORT_BLOCKED_DESTINATION', message);
+
+// The one guard message that says how to open the network up on purpose.
+const PRIVATE_HINT = 'Set IMPORT_ALLOW_PRIVATE=1 on the server to allow internal addresses.';
 
 // IPv4 ranges that are not public. Anything not listed here is treated as public.
 const V4_BLOCKED = new net.BlockList();
@@ -111,36 +117,54 @@ function isGlobalV6(bytes) {
 }
 
 // Checks the URL the user gave. Returns the parsed URL. Throws AppError with a stable code.
-function validateImportUrl(raw) {
-  if (typeof raw !== 'string' || raw.length === 0 || raw.length > MAX_URL_CHARS) {
-    throw new AppError(400, 'IMPORT_INVALID_URL', 'Enter a direct https:// link to a file.');
+// With { allowPrivate } the internal-network guard is off: loopback, private ranges, and internal names pass.
+function validateImportUrl(raw, { allowPrivate = false } = {}) {
+  if (typeof raw !== 'string' || raw.length === 0) {
+    throw new AppError(400, 'IMPORT_INVALID_URL', 'Enter a direct http:// or https:// link to a file.');
   }
   if (/[\u0000-\u0020\u007f]/.test(raw)) {
     throw new AppError(400, 'IMPORT_INVALID_URL', 'The link contains spaces or control characters.');
+  }
+  // A data: link carries the file inside itself, so it can be longer than a network link. Its decoded size is
+  // checked against the same file limit in the downloader.
+  if (raw.length > MAX_URL_CHARS && !raw.startsWith('data:')) {
+    throw new AppError(400, 'IMPORT_INVALID_URL', 'Enter a direct http:// or https:// link to a file.');
   }
   let url;
   try {
     url = new URL(raw);
   } catch {
-    throw new AppError(400, 'IMPORT_INVALID_URL', 'Enter a direct https:// link to a file.');
+    throw new AppError(400, 'IMPORT_INVALID_URL', 'Enter a direct http:// or https:// link to a file.');
   }
-  if (url.protocol !== 'https:') {
-    throw new AppError(400, 'IMPORT_INVALID_URL', 'Only https:// links can be imported.');
+  if (url.protocol === 'data:') {
+    // Needs the shape data:[mediatype][;base64],payload. The payload is decoded by the downloader.
+    if (!/^data:[^,]*,/.test(raw)) {
+      throw new AppError(400, 'IMPORT_INVALID_URL', 'Enter a direct http:// or https:// link to a file.');
+    }
+    url.hash = '';
+    return url;
   }
-  if (url.username || url.password) {
-    throw new AppError(400, 'IMPORT_INVALID_URL', 'Links with a user name or password are not allowed.');
-  }
-  if (url.port !== '') {
-    throw new AppError(400, 'IMPORT_INVALID_URL', 'Only the standard HTTPS port (443) can be used.');
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new AppError(400, 'IMPORT_INVALID_URL', 'Only http:// and https:// links can be imported.');
   }
   let host = url.hostname.toLowerCase();
-  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
-  if (net.isIP(host)) throw blocked('Links must use a host name, not an IP address.');
+  const isAddress = host.startsWith('[') && host.endsWith(']');
+  if (isAddress) host = host.slice(1, -1);
+  if (net.isIP(host)) {
+    if (!allowPrivate && isBlockedAddress(host)) {
+      throw blocked(`That address is not public. ${PRIVATE_HINT}`);
+    }
+    url.hostname = host; // the URL setter puts the brackets back on IPv6
+    url.hash = '';
+    return url;
+  }
   if (host.endsWith('.')) host = host.slice(0, -1);
-  if (host.length === 0 || host.length > 253 || !host.includes('.')) {
+  if (host.length === 0 || host.length > 253) {
     throw blocked('That host name is not a public internet name.');
   }
-  if (BLOCKED_NAME_RE.test(host)) throw blocked('That host name is not allowed.');
+  if (!allowPrivate && BLOCKED_NAME_RE.test(host)) {
+    throw blocked(`That host name points inside a private network. ${PRIVATE_HINT}`);
+  }
   if (!host.split('.').every((label) => LABEL_RE.test(label))) {
     throw new AppError(400, 'IMPORT_INVALID_URL', 'The host name is not valid.');
   }
@@ -149,9 +173,9 @@ function validateImportUrl(raw) {
   return url;
 }
 
-// Resolves a host name and returns its public addresses. Any non-public address refuses the whole name.
+// Resolves a host name and returns its addresses. By default any non-public address refuses the whole name.
 // `lookup` is injectable for tests; production uses the system resolver.
-async function resolvePublicAddresses(hostname, lookup = dns.promises.lookup) {
+async function resolvePublicAddresses(hostname, lookup = dns.promises.lookup, { allowPrivate = false } = {}) {
   let records;
   try {
     records = await lookup(hostname, { all: true, verbatim: true });
@@ -162,8 +186,8 @@ async function resolvePublicAddresses(hostname, lookup = dns.promises.lookup) {
     throw new AppError(502, 'IMPORT_DNS_FAILED', 'The host name could not be resolved.');
   }
   const addresses = [...new Set(records.map((r) => r.address))];
-  if (addresses.some((a) => isBlockedAddress(a))) {
-    throw blocked('That host name points to a network this server may not use.');
+  if (!allowPrivate && addresses.some((a) => isBlockedAddress(a))) {
+    throw blocked(`That host name points to a network this server may not use. ${PRIVATE_HINT}`);
   }
   return addresses;
 }

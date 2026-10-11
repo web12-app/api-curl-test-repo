@@ -86,6 +86,10 @@ function loadUploadSettings(env = process.env) {
   if (tempDir && !path.isAbsolute(tempDir)) {
     return { ok: false, missing: ['FILE_TEMP_DIR (must be an absolute path)'] };
   }
+  // URL imports reach only public internet addresses unless this is set. Setting it lets imports reach loopback,
+  // private ranges, and internal names on purpose (an internal file server, for example).
+  const allowPrivateRaw = (env.IMPORT_ALLOW_PRIVATE || '').trim().toLowerCase();
+  limits.importAllowPrivate = ['1', 'true', 'yes', 'on'].includes(allowPrivateRaw);
   return { ok: true, limits, tempDir: tempDir || null };
 }
 

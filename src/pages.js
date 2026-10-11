@@ -294,7 +294,7 @@ function welcomePage() {
           <article class="card">${ICON.eye}<h3>Instant previews</h3><p>Images, PDF, text, video, and audio open in a sandboxed viewer. Unknown or active types download safely instead.</p></article>
           <article class="card">${ICON.link}<h3>Share links</h3><p>Publish a file with one link and turn it off whenever you want. Re-enabling makes a fresh link, so old ones stop working.</p></article>
           <article class="card">${ICON.upload}<h3>Upload links</h3><p>Let someone without an account send you a file through a revocable link with its own file and size limits.</p></article>
-          <article class="card">${ICON.layers}<h3>Resume big uploads</h3><p>Large files are sent in verified pieces, so a dropped connection never restarts from zero. You can also import straight from a public https URL.</p></article>
+          <article class="card">${ICON.layers}<h3>Resume big uploads</h3><p>Large files are sent in verified pieces, so a dropped connection never restarts from zero. You can also import straight from any http or https URL.</p></article>
         </div>
       </section>
     </main>
@@ -368,7 +368,7 @@ function appHomePage(user, { filesEnabled = false } = {}) {
      <h2>Quick actions</h2>
      <div class="quick-grid">
        <a class="quick-card" href="/explore">${ICON.folder}<div><h3>Explore files</h3><p>Browse, search, preview, share, and download everything you have stored.</p></div></a>
-       <a class="quick-card" href="/explore#upload">${ICON.upload}<div><h3>Upload</h3><p>Drag files in, pick them, or import from a public https URL.</p></div></a>
+       <a class="quick-card" href="/explore#upload">${ICON.upload}<div><h3>Upload</h3><p>Drag files in, pick them, or import from any http or https URL.</p></div></a>
        <a class="quick-card" href="/explore#links">${ICON.link}<div><h3>Upload links</h3><p>Let someone without an account send you a file through a revocable link.</p></div></a>
      </div>
      <h2>Good to know</h2>
@@ -443,10 +443,10 @@ function explorePage(user, { filesEnabled = false, maxBytes = 0, linkMaxFiles = 
        <form id="url-form" class="url-form">
          <label for="url-input">Upload from URL</label>
          <div class="url-row">
-           <input type="url" id="url-input" name="url" placeholder="Enter direct file URL" aria-label="Enter direct file URL" autocomplete="off" maxlength="2048" required>
+           <input type="text" id="url-input" name="url" inputmode="url" placeholder="Paste any file link (http, https, data:)" aria-label="Paste any file link" autocomplete="off" maxlength="16384" required spellcheck="false">
            <button type="submit" id="url-submit">Import</button>
          </div>
-         <p class="hint">Paste a public https:// link to a file, up to ${mb} MB. The server downloads it; the link is not kept after the import finishes.</p>
+         <p class="hint">Paste any direct link to a file: http:// or https:// (any port, IP address, or user:pass for private files), or a data: link, up to ${mb}. The server downloads it in the background; the link is not kept after the import finishes.</p>
        </form>
        <ul id="queue" class="queue" aria-label="Uploads"></ul>
        <ul id="imports" class="queue" aria-label="Imports from URL"></ul>
