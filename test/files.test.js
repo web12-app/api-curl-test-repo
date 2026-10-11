@@ -1,0 +1,700 @@
+'use strict';
+
+// End-to-end tests for login, file upload, storage in GitHub releases, download, delete, and isolation.
+// GitHub is the local fake (test/fake-github.js), reached over real HTTP. No real token or repository is used.
+const { test, before, beforeEach, after } = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const http = require('node:http');
+const { createServer } = require('../src/server');
+const { GitHubStorage } = require('../src/github-storage');
+const { GitHubReleases } = require('../src/github-releases');
+const { startFakeGitHub } = require('./fake-github');
+const { sessionFrom } = require('./helpers');
+
+const TOKEN = 'ghp_test_token_not_real';
+const DATA_REPO = 'owner/private-data';
+const STORE_REPO = 'owner/files';
+const ENV = {
+  GITHUB_TOKEN: TOKEN,
+  PRIVATE_DATA_REPO: DATA_REPO,
+  SESSION_SECRET: 'test-session-secret-that-is-long-enough-1234',
+  COOKIE_SECURE: '0',
+  GITHUB_OWNER: 'owner',
+  GITHUB_STORAGE_REPO: 'files',
+};
+
+let fake;
+before(async () => {
+  fake = await startFakeGitHub({
+    privateRepos: {
+      [DATA_REPO]: { private: true, push: true },
+      [STORE_REPO]: { private: true, push: true },
+    },
+  });
+});
+beforeEach(() => {
+  fake.reset();
+});
+after(async () => {
+  await fake.close();
+});
+
+// A running app with its own clock. Each call builds fresh clients, so state lives only in the fake GitHub,
+// the way it does in production.
+async function startApp({ env = ENV, limits, clock = { t: Date.now() }, storeRepo = STORE_REPO } = {}) {
+  const storage = new GitHubStorage({ token: TOKEN, repo: DATA_REPO, apiBase: fake.base });
+  const releases = new GitHubReleases({ token: TOKEN, repo: storeRepo, apiBase: fake.base, uploadBase: fake.uploadBase });
+  const server = createServer({ env, storage, releases, limits, now: () => clock.t });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  return {
+    base,
+    clock,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+async function withApp(opts, fn) {
+  const app = await startApp(opts);
+  try {
+    await fn(app);
+  } finally {
+    await app.close();
+  }
+}
+
+const uniqueName = (prefix) => `${prefix}_${crypto.randomBytes(3).toString('hex')}`;
+
+async function signup(app, username = uniqueName('user'), password = 'password-one') {
+  const res = await fetch(`${app.base}/api/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: app.base },
+    body: JSON.stringify({ username, password }),
+  });
+  assert.equal(res.status, 201);
+  return { username, password, cookie: sessionFrom(res), userId: (await res.json()).data.user.id };
+}
+
+async function login(app, username, password) {
+  const res = await fetch(`${app.base}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Origin: app.base },
+    body: JSON.stringify({ username, password }),
+  });
+  return { res, cookie: sessionFrom(res), body: await res.json() };
+}
+
+// Uploads one file through the real multipart endpoint.
+async function upload(app, cookie, name, bytes, { type = 'text/plain', uploadId = crypto.randomUUID(), headers = {} } = {}) {
+  const form = new FormData();
+  form.append('uploadId', uploadId);
+  form.append('file', new Blob([bytes], { type }), name);
+  const res = await fetch(`${app.base}/api/files/upload`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'X-Requested-With': 'fetch', Origin: app.base, ...headers },
+    body: form,
+  });
+  return { res, uploadId, body: await res.json() };
+}
+
+const authed = (app, cookie, path, init = {}) =>
+  fetch(`${app.base}${path}`, {
+    ...init,
+    headers: { Cookie: cookie, 'X-Requested-With': 'fetch', Origin: app.base, ...(init.headers || {}) },
+  });
+
+async function listFiles(app, cookie, query = '') {
+  const res = await authed(app, cookie, `/api/files${query}`);
+  return { status: res.status, data: (await res.json()).data };
+}
+
+// Assets in the storage repo, as the fake holds them.
+const storedAssets = () => fake.assetsIn(STORE_REPO);
+
+// ---- login contract (unchanged behavior)
+
+test('signup returns 201, login returns 200 with valid credentials, and 401 with invalid ones', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const good = await login(app, user.username, user.password);
+    assert.equal(good.res.status, 200);
+    assert.ok(good.cookie);
+    const bad = await login(app, user.username, 'wrong-password-here');
+    assert.equal(bad.res.status, 401);
+    assert.equal(bad.body.error.code, 'INVALID_CREDENTIALS');
+  });
+});
+
+test('unauthenticated uploads, lists, downloads, and deletes are rejected', async () => {
+  await withApp({}, async (app) => {
+    const up = await fetch(`${app.base}/api/files/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'multipart/form-data; boundary=x', 'X-Requested-With': 'fetch', Origin: app.base },
+      body: 'x',
+    });
+    assert.equal(up.status, 401);
+    const id = crypto.randomBytes(16).toString('hex');
+    const list = await fetch(`${app.base}/api/files`);
+    assert.equal(list.status, 401);
+    assert.equal((await list.json()).error.code, 'NOT_AUTHENTICATED');
+    assert.equal((await fetch(`${app.base}/api/files/${id}/download`)).status, 401);
+    const del = await fetch(`${app.base}/api/files/${id}`, { method: 'DELETE', headers: { 'X-Requested-With': 'fetch', Origin: app.base } });
+    assert.equal(del.status, 401);
+  });
+});
+
+test('an authenticated upload succeeds, and the bytes are stored as a release asset in the private storage repo', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const bytes = Buffer.from('hello from the test\n', 'utf8');
+    const { res, body } = await upload(app, user.cookie, 'notes.txt', bytes);
+    assert.equal(res.status, 201);
+    const file = body.data.file;
+    assert.equal(file.name, 'notes.txt');
+    assert.equal(file.size, bytes.length);
+    assert.equal(file.type, 'text/plain; charset=utf-8');
+
+    const assets = storedAssets();
+    assert.equal(assets.length, 1);
+    assert.equal(assets[0].name, `${file.id}.txt`);
+    assert.ok(assets[0].buf.equals(bytes));
+    assert.ok(fake.tags.has(`${STORE_REPO}:upload-${file.id}`), 'one release tag per upload');
+
+    // The response never shows GitHub internals.
+    const text = JSON.stringify(body);
+    assert.doesNotMatch(text, /upload-|assetId|releaseId|api\.github|uploads\.github|ghp_/);
+  });
+});
+
+test('file metadata persists across an application restart', async () => {
+  const clock = { t: Date.now() };
+  let userCookie;
+  let fileId;
+  await withApp({ clock }, async (app) => {
+    const user = await signup(app);
+    userCookie = user.cookie;
+    fileId = (await upload(app, user.cookie, 'survives.txt', 'still here')).body.data.file.id;
+  });
+  // Brand-new process state: a new server, new clients. Only GitHub holds the data.
+  await withApp({ clock }, async (app) => {
+    const { status, data } = await listFiles(app, userCookie);
+    assert.equal(status, 200);
+    assert.equal(data.files.length, 1);
+    assert.equal(data.files[0].id, fileId);
+    const dl = await authed(app, userCookie, `/api/files/${fileId}/download`);
+    assert.equal(await dl.text(), 'still here');
+  });
+});
+
+test('a download returns the original bytes with safe headers, and the token is not sent to the storage host', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    const { body } = await upload(app, user.cookie, 'picture.png', bytes, { type: 'image/png' });
+    fake.resetCalls();
+
+    const res = await authed(app, user.cookie, `/api/files/${body.data.file.id}/download`);
+    assert.equal(res.status, 200);
+    assert.ok((await res.arrayBuffer()).byteLength === bytes.length);
+    assert.equal(res.headers.get('content-type'), 'image/png');
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    assert.match(res.headers.get('content-disposition'), /^attachment; filename="picture\.png"/);
+
+    const storageHop = fake.calls.filter((c) => c.path.startsWith('/blob/'));
+    assert.equal(storageHop.length, 1);
+    assert.equal(storageHop[0].authed, false, 'the signed storage URL is fetched without the GitHub token');
+  });
+});
+
+test('a download with a non-ASCII name keeps the name in filename*', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'résumé final.txt', 'cv');
+    const res = await authed(app, user.cookie, `/api/files/${body.data.file.id}/download`);
+    assert.match(res.headers.get('content-disposition'), /filename\*=UTF-8''r%C3%A9sum%C3%A9%20final\.txt/);
+    assert.equal(await res.text(), 'cv');
+  });
+});
+
+test('one user cannot list, download, or delete another user\'s file', async () => {
+  await withApp({}, async (app) => {
+    const alice = await signup(app, uniqueName('alice'));
+    const bob = await signup(app, uniqueName('bob'));
+    const { body } = await upload(app, alice.cookie, 'private.txt', 'alice only');
+    const id = body.data.file.id;
+
+    assert.equal((await listFiles(app, bob.cookie)).data.files.length, 0);
+    assert.equal((await authed(app, bob.cookie, `/api/files/${id}/download`)).status, 404);
+    const del = await authed(app, bob.cookie, `/api/files/${id}`, { method: 'DELETE' });
+    assert.equal(del.status, 404);
+
+    // Alice still has it, and it is still in storage.
+    assert.equal((await listFiles(app, alice.cookie)).data.files.length, 1);
+    assert.equal(storedAssets().length, 1);
+    const still = await authed(app, alice.cookie, `/api/files/${id}/download`);
+    assert.equal(await still.text(), 'alice only');
+  });
+});
+
+test('delete removes the asset, its release and tag, and the record', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'gone.txt', 'bye');
+    const id = body.data.file.id;
+    const res = await authed(app, user.cookie, `/api/files/${id}`, { method: 'DELETE' });
+    assert.equal(res.status, 200);
+    assert.deepEqual((await res.json()).data, { id, deleted: true });
+
+    assert.equal(storedAssets().length, 0);
+    assert.equal(fake.tags.has(`${STORE_REPO}:upload-${id}`), false);
+    assert.equal((await listFiles(app, user.cookie)).data.files.length, 0);
+    // Deleting it again is a clean 404.
+    assert.equal((await authed(app, user.cookie, `/api/files/${id}`, { method: 'DELETE' })).status, 404);
+  });
+});
+
+test('invalid file types and mismatched contents are rejected, and nothing is stored', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    for (const [name, bytes] of [
+      ['page.html', '<script>alert(1)</script>'],
+      ['vector.svg', '<svg></svg>'],
+      ['program.exe', 'MZ'],
+    ]) {
+      const { res, body } = await upload(app, user.cookie, name, bytes);
+      assert.equal(res.status, 415, name);
+      assert.equal(body.error.code, 'UNSUPPORTED_FILE_TYPE', name);
+    }
+    // A PNG name with text inside is refused on content, not on name.
+    const fakePng = await upload(app, user.cookie, 'fake.png', 'definitely not a png', { type: 'image/png' });
+    assert.equal(fakePng.res.status, 415);
+    assert.equal(fakePng.body.error.code, 'FILE_CONTENT_MISMATCH');
+    // Text files must be valid UTF-8 with no NUL bytes.
+    const nul = await upload(app, user.cookie, 'bad.txt', Buffer.from('ok\u0000no'));
+    assert.equal(nul.body.error.code, 'FILE_CONTENT_MISMATCH');
+
+    assert.equal(storedAssets().length, 0);
+    assert.equal((await listFiles(app, user.cookie)).data.files.length, 0);
+  });
+});
+
+test('an oversized upload is refused with 413 before it is stored, both with and without Content-Length', async () => {
+  await withApp({ env: ENV, limits: { maxFileBytes: 1000 } }, async (app) => {
+    const user = await signup(app);
+    const port = new URL(app.base).port;
+    const boundary = 'b' + crypto.randomBytes(6).toString('hex');
+    const head = `--${boundary}\r\nContent-Disposition: form-data; name="uploadId"\r\n\r\n${crypto.randomUUID()}\r\n` +
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="big.txt"\r\nContent-Type: text/plain\r\n\r\n`;
+    const tail = `\r\n--${boundary}--\r\n`;
+    const chunk = 'x'.repeat(4096);
+
+    // Declared length far above the limit: refused from the header alone.
+    const declared = await new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: '/api/files/upload',
+        headers: {
+          Cookie: user.cookie,
+          'X-Requested-With': 'fetch',
+          Origin: app.base,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': String(10 * 1024 * 1024),
+        },
+      });
+      req.on('response', (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.on('error', reject);
+      req.write(head);
+      req.end(chunk);
+    });
+    assert.equal(declared.status, 413);
+    assert.equal(JSON.parse(declared.body).error.code, 'FILE_TOO_LARGE');
+
+    // No Content-Length (chunked): refused while streaming, once the limit is passed.
+    const streamed = await new Promise((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: '/api/files/upload',
+        headers: {
+          Cookie: user.cookie,
+          'X-Requested-With': 'fetch',
+          Origin: app.base,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Transfer-Encoding': 'chunked',
+        },
+      });
+      req.on('response', (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.on('error', () => resolve({ status: 0, body: '' }));
+      req.write(head);
+      for (let i = 0; i < 8; i++) req.write(chunk);
+      req.end(tail);
+    });
+    assert.equal(streamed.status, 413);
+    assert.equal(storedAssets().length, 0);
+  });
+});
+
+test('unsafe file names are reduced to a plain display name and never used as a storage path', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { res, body } = await upload(app, user.cookie, '../../etc/passwd.txt', 'x');
+    assert.equal(res.status, 201);
+    assert.equal(body.data.file.name, 'passwd.txt');
+    const [asset] = storedAssets();
+    assert.match(asset.name, /^[a-f0-9]{32}\.txt$/, 'storage name is the generated id, never the client name');
+
+    const dots = await upload(app, user.cookie, '..', 'x');
+    assert.equal(dots.res.status, 400);
+    assert.equal(dots.body.error.code, 'INVALID_FILENAME');
+  });
+});
+
+test('repeating an upload with the same uploadId stores the file once', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const uploadId = crypto.randomUUID();
+    const first = await upload(app, user.cookie, 'once.txt', 'same', { uploadId });
+    const second = await upload(app, user.cookie, 'once.txt', 'same', { uploadId });
+    assert.equal(first.res.status, 201);
+    assert.equal(second.res.status, 200);
+    assert.equal(second.body.data.file.id, first.body.data.file.id);
+    assert.equal(storedAssets().length, 1);
+    assert.equal((await listFiles(app, user.cookie)).data.files.length, 1);
+  });
+});
+
+test('concurrent uploads by one user are all recorded', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const results = await Promise.all(
+      ['a.txt', 'b.txt', 'c.txt'].map((name) => upload(app, user.cookie, name, `content ${name}`)),
+    );
+    results.forEach((r) => assert.equal(r.res.status, 201));
+    const { data } = await listFiles(app, user.cookie);
+    assert.deepEqual(data.files.map((f) => f.name).sort(), ['a.txt', 'b.txt', 'c.txt']);
+    assert.equal(storedAssets().length, 3);
+  });
+});
+
+test('a GitHub failure while storing the asset leaves no file behind and reports the error', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    fake.fault('POST', /^\/uploads\/repos\//, 500, { times: 1 });
+    const { res, body } = await upload(app, user.cookie, 'flaky.txt', 'data');
+    assert.equal(res.status, 503);
+    assert.equal(body.error.code, 'UPSTREAM_ERROR');
+    assert.equal((await listFiles(app, user.cookie)).data.files.length, 0);
+    assert.equal(storedAssets().length, 0);
+    assert.equal(fake.releases.size, 0, 'the empty release from the failed attempt is removed');
+  });
+});
+
+test('a failed release creation is not retried automatically, and the account stays clean', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    fake.resetCalls();
+    fake.fault('POST', /\/releases$/, 500, { times: 1 });
+    const { res } = await upload(app, user.cookie, 'once-only.txt', 'data');
+    assert.equal(res.status, 503);
+    const releaseWrites = fake.calls.filter((c) => c.method === 'POST' && /\/releases$/.test(c.path));
+    assert.equal(releaseWrites.length, 1, 'a failed write is not sent again');
+    assert.equal((await listFiles(app, user.cookie)).data.files.length, 0);
+  });
+});
+
+test('a GitHub rate limit is reported with its own code', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    fake.fault('POST', /^\/uploads\/repos\//, 403, {
+      times: 1,
+      headers: { 'x-ratelimit-remaining': '0' },
+      body: { message: 'API rate limit exceeded' },
+    });
+    const { res, body } = await upload(app, user.cookie, 'limited.txt', 'data');
+    assert.equal(res.status, 503);
+    assert.equal(body.error.code, 'RATE_LIMITED');
+  });
+});
+
+test('when the record cannot be saved after the asset is stored, the file is not shown and the record is cleaned up later', async () => {
+  const clock = { t: Date.now() };
+  await withApp({ clock }, async (app) => {
+    const user = await signup(app);
+    // Manifest writes in order: 1) reservation, 2) mark ready. Let the first through and fail the second.
+    const manifestPath = new RegExp(`^/repos/${DATA_REPO}/contents/uploads/${user.userId}/manifest\\.json$`);
+    fake.fault('PUT', manifestPath, 500, { times: 1, skip: 1 });
+    fake.resetCalls();
+
+    const { res } = await upload(app, user.cookie, 'half.txt', 'half done');
+    assert.equal(res.status, 503);
+    const manifestWrites = fake.calls.filter((c) => c.method === 'PUT' && manifestPath.test(c.path));
+    assert.equal(manifestWrites.length, 2, 'the failed write is not retried');
+    assert.equal(storedAssets().length, 1, 'the bytes did reach storage');
+    assert.equal((await listFiles(app, user.cookie)).data.files.length, 0, 'the record is pending, so it is not shown');
+
+    // 16 minutes later the abandoned record is cleaned up together with its release, and uploads work again.
+    clock.t += 16 * 60 * 1000;
+    const next = await upload(app, user.cookie, 'after.txt', 'fresh');
+    assert.equal(next.res.status, 201);
+    assert.equal(storedAssets().length, 1, 'only the new file remains in storage');
+    assert.equal(fake.releases.size, 1, 'the abandoned release is gone');
+    assert.equal((await listFiles(app, user.cookie)).data.files.map((f) => f.name).join(), 'after.txt');
+  });
+});
+
+test('a failed cleanup keeps the record for a later retry, and the next write retries it', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    // Asset upload fails, and removing the empty release also fails once.
+    fake.fault('POST', /^\/uploads\/repos\//, 500, { times: 1 });
+    fake.fault('DELETE', /^\/repos\/owner\/files\/releases\/\d+$/, 500, { times: 1 });
+    const failed = await upload(app, user.cookie, 'leftover.txt', 'x');
+    assert.equal(failed.res.status, 503);
+    assert.equal(fake.releases.size, 1, 'the release could not be removed the first time');
+
+    // The next upload's cleanup retries the removal and succeeds.
+    const ok = await upload(app, user.cookie, 'next.txt', 'y');
+    assert.equal(ok.res.status, 201);
+    assert.equal(fake.releases.size, 1, 'the leftover release was removed; only the new one remains');
+    assert.equal((await listFiles(app, user.cookie)).data.files.length, 1);
+  });
+});
+
+test('a failed asset delete leaves the file marked "deleting" and a retry finishes the job', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'retry-me.txt', 'data');
+    const id = body.data.file.id;
+    fake.fault('DELETE', /^\/repos\/owner\/files\/releases\/assets\/\d+$/, 500, { times: 1 });
+    const first = await authed(app, user.cookie, `/api/files/${id}`, { method: 'DELETE' });
+    assert.equal(first.status, 503);
+
+    const listed = await listFiles(app, user.cookie);
+    assert.equal(listed.data.files.length, 1);
+    assert.equal(listed.data.files[0].status, 'deleting');
+
+    const retry = await authed(app, user.cookie, `/api/files/${id}`, { method: 'DELETE' });
+    assert.equal(retry.status, 200);
+    assert.equal((await listFiles(app, user.cookie)).data.files.length, 0);
+    assert.equal(storedAssets().length, 0);
+  });
+});
+
+test('a file whose asset was removed outside the app returns 404 with a clear code', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'vanished.txt', 'data');
+    const asset = storedAssets()[0];
+    fake.assets.delete(`${STORE_REPO}:${asset.id}`);
+    const res = await authed(app, user.cookie, `/api/files/${body.data.file.id}/download`);
+    assert.equal(res.status, 404);
+    assert.equal((await res.json()).error.code, 'FILE_MISSING');
+  });
+});
+
+test('uploads are refused when the storage repository is not private', async () => {
+  const publicRepo = 'owner/public-files';
+  fake.setRepo(publicRepo, { private: false, push: true });
+  const env = { ...ENV, GITHUB_STORAGE_REPO: 'public-files' };
+  await withApp({ env, storeRepo: publicRepo }, async (app) => {
+    const user = await signup(app);
+    const { res, body } = await upload(app, user.cookie, 'public.txt', 'data');
+    assert.equal(res.status, 503);
+    assert.equal(body.error.code, 'UPSTREAM_ERROR');
+    assert.equal(storedAssets().length, 0, 'nothing reached the public repository');
+    assert.equal(fake.releases.size, 0);
+  });
+});
+
+test('uploads beyond the per-user quota are refused', async () => {
+  await withApp({ limits: { userQuotaBytes: 1500, maxFileBytes: 1000 } }, async (app) => {
+    const user = await signup(app);
+    const first = await upload(app, user.cookie, 'one.txt', 'x'.repeat(1000));
+    assert.equal(first.res.status, 201);
+    const second = await upload(app, user.cookie, 'two.txt', 'x'.repeat(600));
+    assert.equal(second.res.status, 507);
+    assert.equal(second.body.error.code, 'QUOTA_EXCEEDED');
+    const { data } = await listFiles(app, user.cookie);
+    assert.equal(data.quota.usedBytes, 1000);
+    assert.equal(data.quota.limitBytes, 1500);
+  });
+});
+
+test('search and category filters narrow the list', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    await upload(app, user.cookie, 'meeting-notes.txt', 'n');
+    await upload(app, user.cookie, 'holiday.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), { type: 'image/png' });
+    assert.equal((await listFiles(app, user.cookie, '?category=image')).data.files.map((f) => f.name).join(), 'holiday.png');
+    assert.equal((await listFiles(app, user.cookie, '?q=NOTES')).data.files.map((f) => f.name).join(), 'meeting-notes.txt');
+    assert.equal((await listFiles(app, user.cookie, '?category=video')).status, 400);
+  });
+});
+
+test('a cross-site upload or delete is refused with 403, whatever the cookie', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'mine.txt', 'data');
+    const evil = { Origin: 'https://evil.example' };
+    const up = await upload(app, user.cookie, 'attack.txt', 'x', { headers: evil });
+    assert.equal(up.res.status, 403);
+    assert.equal(up.body.error.code, 'CROSS_SITE_REFUSED');
+    const del = await authed(app, user.cookie, `/api/files/${body.data.file.id}`, { method: 'DELETE', headers: evil });
+    assert.equal(del.status, 403);
+    assert.equal((await listFiles(app, user.cookie)).data.files.length, 1);
+  });
+});
+
+test('upload and delete require the X-Requested-With header', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'csrf.txt', 'data');
+    const form = new FormData();
+    form.append('uploadId', crypto.randomUUID());
+    form.append('file', new Blob(['x'], { type: 'text/plain' }), 'no-header.txt');
+    const up = await fetch(`${app.base}/api/files/upload`, {
+      method: 'POST',
+      headers: { Cookie: user.cookie, Origin: app.base },
+      body: form,
+    });
+    assert.equal(up.status, 403);
+    assert.equal((await up.json()).error.code, 'CSRF_HEADER_REQUIRED');
+    const del = await fetch(`${app.base}/api/files/${body.data.file.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: user.cookie, Origin: app.base },
+    });
+    assert.equal(del.status, 403);
+  });
+});
+
+test('logout ends the session on the server: a copied cookie stops working in every browser', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const second = await login(app, user.username, user.password);
+    const first = user.cookie;
+    assert.equal((await (await authed(app, first, '/api/me')).json()).data.user.username, user.username);
+
+    const out = await fetch(`${app.base}/api/logout`, { method: 'POST', headers: { Cookie: first, Origin: app.base } });
+    assert.equal(out.status, 200);
+    assert.match(out.headers.get('set-cookie'), /session=;.*Max-Age=0/);
+
+    // Both the logged-out cookie and the other device's cookie are refused.
+    assert.equal((await (await authed(app, first, '/api/me')).json()).data.user, null);
+    assert.equal((await (await authed(app, second.cookie, '/api/me')).json()).data.user, null);
+    assert.equal((await authed(app, second.cookie, '/dashboard', { redirect: 'manual' })).status, 303);
+    assert.equal((await listFiles(app, second.cookie).then((r) => r.status)), 401);
+
+    // A new login works.
+    const again = await login(app, user.username, user.password);
+    assert.equal((await (await authed(app, again.cookie, '/api/me')).json()).data.user.username, user.username);
+  });
+});
+
+test('file routes say which setting is missing when storage is not configured, and login still works', async () => {
+  const env = { ...ENV };
+  delete env.GITHUB_OWNER;
+  await withApp({ env }, async (app) => {
+    const user = await signup(app);
+    const res = await authed(app, user.cookie, '/api/files');
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.equal(body.error.code, 'FILES_NOT_CONFIGURED');
+    assert.match(body.error.message, /GITHUB_OWNER/);
+    assert.doesNotMatch(body.error.message, /ghp_|private-data/);
+    const dash = await authed(app, user.cookie, '/dashboard');
+    assert.match(await dash.text(), /File storage is not set up/);
+  });
+});
+
+test('the storage repository cannot be the same as the private data repository', async () => {
+  const env = { ...ENV, GITHUB_STORAGE_REPO: 'private-data', GITHUB_OWNER: 'owner' };
+  const { loadFileConfig } = require('../src/config');
+  const loaded = loadFileConfig(env, { privateDataRepo: DATA_REPO });
+  assert.equal(loaded.ok, false);
+  assert.match(loaded.missing[0], /must differ/);
+});
+
+test('the dashboard page has the upload and list UI, and contains no GitHub details', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    await upload(app, user.cookie, 'listed.txt', 'data');
+    const res = await authed(app, user.cookie, '/dashboard');
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    for (const marker of ['id="drop"', 'id="picker"', 'id="files"', 'id="search"', 'id="category"', 'X-Requested-With']) {
+      assert.ok(html.includes(marker), marker);
+    }
+    assert.doesNotMatch(html, /ghp_|api\.github|uploads\.github|upload-[a-f0-9]{8}|assetId/);
+    assert.match(html, new RegExp(user.username));
+    assert.doesNotMatch(html, /listed\.txt/, 'the page loads the list itself; it is not rendered into the HTML');
+    const anon = await fetch(`${app.base}/dashboard`, { redirect: 'manual' });
+    assert.equal(anon.status, 303);
+    assert.equal(anon.headers.get('location'), '/login');
+  });
+});
+
+test('several uploads, including each id, never reveal a token in any response body', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const bodies = [];
+    bodies.push(JSON.stringify((await upload(app, user.cookie, 'a.txt', 'a')).body));
+    bodies.push(await (await authed(app, user.cookie, '/api/files')).text());
+    for (const text of bodies) {
+      assert.doesNotMatch(text, new RegExp(TOKEN));
+      assert.doesNotMatch(text, /api\.github|uploads\.github|\/blob\//);
+    }
+  });
+});
+
+test('uploads are capped in flight, and an abandoned upload frees its slot', async () => {
+  await withApp({ limits: { maxConcurrentUploads: 1 } }, async (app) => {
+    const user = await signup(app);
+    const url = new URL(app.base);
+    const boundary = 'stuck-boundary-1';
+    // An upload that starts and then stalls, so it holds the only slot.
+    const stuck = http.request({
+      host: url.hostname,
+      port: url.port,
+      method: 'POST',
+      path: '/api/files/upload',
+      headers: {
+        Cookie: user.cookie,
+        Origin: app.base,
+        'X-Requested-With': 'fetch',
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': 100000,
+      },
+    });
+    stuck.on('error', () => {});
+    stuck.write(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.txt"\r\nContent-Type: text/plain\r\n\r\nhello`);
+    await new Promise((r) => setTimeout(r, 150));
+
+    const blocked = await upload(app, user.cookie, 'b.txt', 'b');
+    assert.equal(blocked.res.status, 429);
+    assert.equal(blocked.body.error.code, 'TOO_MANY_UPLOADS');
+
+    // The client goes away. The slot is released and the next upload succeeds.
+    stuck.destroy();
+    let last = null;
+    for (let i = 0; i < 100; i++) {
+      last = await upload(app, user.cookie, 'c.txt', 'c');
+      if (last.res.status === 201) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(last.res.status, 201, `status ${last.res.status}`);
+    assert.equal(storedAssets().length, 1, 'the abandoned upload stored nothing');
+  });
+});

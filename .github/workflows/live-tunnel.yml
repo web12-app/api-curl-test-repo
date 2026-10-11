@@ -105,6 +105,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          # File storage settings. Names only, not secrets. Without them login still works and files are disabled.
+          GITHUB_OWNER: ${{ vars.GITHUB_OWNER }}
+          GITHUB_STORAGE_REPO: ${{ vars.GITHUB_STORAGE_REPO }}
         run: |
           set -uo pipefail
           # Config comes from the environment only. The app never logs secret values.

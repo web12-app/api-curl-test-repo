@@ -1,6 +1,6 @@
 'use strict';
 
-// Signed session cookies: base64url(payload).HMAC-SHA256(payload). The payload holds only the user id and expiry.
+// Signed session cookies: base64url(payload).HMAC-SHA256(payload). The payload holds the user id, issue time, and expiry.
 const crypto = require('node:crypto');
 
 const COOKIE_NAME = 'session';
@@ -10,7 +10,7 @@ function sign(secret, value) {
 }
 
 function createSession(secret, userId, ttlMs, now = Date.now()) {
-  const payload = Buffer.from(JSON.stringify({ uid: userId, exp: now + ttlMs })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({ uid: userId, iat: now, exp: now + ttlMs })).toString('base64url');
   return `${payload}.${sign(secret, payload)}`;
 }
 
@@ -29,7 +29,9 @@ function readSession(secret, token, now = Date.now()) {
   } catch {
     return null;
   }
-  if (typeof data.uid !== 'string' || typeof data.exp !== 'number' || data.exp <= now) return null;
+  // iat is needed so that logout can revoke sessions issued before it. Older tokens without it are refused.
+  if (typeof data.uid !== 'string' || typeof data.iat !== 'number' || typeof data.exp !== 'number') return null;
+  if (data.exp <= now) return null;
   return data;
 }
 
