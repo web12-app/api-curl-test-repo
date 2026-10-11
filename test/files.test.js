@@ -1144,3 +1144,17 @@ test('logs: upload, link, and sharing events print masked names and short refere
     console.log = original;
   }
 });
+
+test('upload links: /u/ requests are limited per address, and the limit answers 429 with Retry-After', async () => {
+  await withApp({}, async (app) => {
+    const bogus = `${app.base}/u/${'A'.repeat(43)}`;
+    let last = null;
+    for (let i = 0; i <= 300; i++) {
+      last = await fetch(bogus);
+      await last.arrayBuffer();
+      if (last.status === 429) break;
+    }
+    assert.equal(last.status, 429, 'the 301st request from one address is refused');
+    assert.equal(last.headers.get('retry-after'), '900');
+  });
+});
