@@ -1,0 +1,14 @@
+{
+  "name": "nodejs-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Minimal Node.js web app (no dependencies).",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/"
+  }
+}
