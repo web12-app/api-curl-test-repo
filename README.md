@@ -9,8 +9,9 @@ separate **private** GitHub repository, so this public repo contains no data and
 - **`web/`**: Next.js 16 (App Router). Pages: `/`, `/signup`, `/login`, `/dashboard`. API: `/api/...`.
 - **Private data repo** (`PRIVATE_DATA_REPO`, for example `web12-app/api-curl-private-data`): users, apps,
   API keys, records, and files as JSON or binary files. Only the server reads and writes it, using `GITHUB_TOKEN`.
-- **Hosting**: Render (see `render.yaml`). The GitHub Pages site is retired with this change, because
-  the UI now runs on the Next.js server.
+- **Hosting**: the app runs on Render (see `render.yaml`).
+- **Welcome page**: `pages/` is a static site on GitHub Pages (`.github/workflows/pages.yml`). It has no Python and
+  no API. Its Log in and Sign up buttons point at the Render app, set by the `APP_URL` variable.
 
 Nothing in this repo may contain a token, password, or key. Configuration comes only from environment variables.
 
@@ -56,6 +57,8 @@ npm run typecheck
 1. In Render: **New → Blueprint**, pick this repo and the `platform-v1` branch (or `main` after merge).
 2. Enter `GITHUB_TOKEN` when prompted. `SECRET_KEY` and `API_KEY_HASH_SECRET` are generated.
 3. Open the service URL. Sign up, create an app, and create a key.
+4. Optional: in the `github-pages` environment, set the variable `APP_URL` to the Render URL, for example
+   `https://pips-platform.onrender.com`. Until it is set, the Pages welcome page disables its buttons.
 
 The free plan sleeps when idle, so the first request after a quiet period can take about a minute.
 

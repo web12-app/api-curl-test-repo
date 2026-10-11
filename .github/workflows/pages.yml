@@ -1,0 +1,49 @@
+name: Deploy welcome page to GitHub Pages
+
+# Static welcome page only. The app and API run on Render (see render.yaml).
+# The build copies pages/ and fills in the app URL. No Python, no secrets.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Reads APP_URL from the github-pages environment variables.
+    environment: github-pages
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build static site
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          set -euo pipefail
+          APP_URL="${APP_URL%/}"
+          rm -rf _site && mkdir _site
+          cp -r pages/. _site/
+          # APP_URL is the public Render URL, for example https://pips-platform.onrender.com
+          find _site -name '*.html' -exec sed -i "s|__APP_URL__|${APP_URL}|g" {} +
+          touch _site/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
