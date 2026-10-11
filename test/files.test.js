@@ -1158,3 +1158,38 @@ test('upload links: /u/ requests are limited per address, and the limit answers 
     assert.equal(last.headers.get('retry-after'), '900');
   });
 });
+
+test('the per-file cap applies to chunked uploads too, through the owner and through an upload link', async () => {
+  await withApp({ limits: { maxFileBytes: 1000 } }, async (app) => {
+    const owner = await signup(app);
+    const { link } = (await (await createLink(app, owner.cookie)).json()).data;
+    const boundary = 'chunkedboundary' + crypto.randomBytes(4).toString('hex');
+    const head = `--${boundary}\r\nContent-Disposition: form-data; name="uploadId"\r\n\r\n${crypto.randomUUID()}\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="chunk.txt"\r\nContent-Type: text/plain\r\n\r\n`;
+    const tail = `\r\n--${boundary}--\r\n`;
+
+    // Sends the body with Transfer-Encoding: chunked (no Content-Length), so the size is only known while streaming.
+    const sendChunked = (path, headers) =>
+      new Promise((resolve, reject) => {
+        const url = new URL(`${app.base}${path}`);
+        const req = http.request(
+          { host: url.hostname, port: url.port, path: url.pathname, method: 'POST',
+            headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Transfer-Encoding': 'chunked', ...headers } },
+          (res) => {
+            let text = '';
+            res.on('data', (c) => (text += c));
+            res.on('end', () => resolve({ status: res.statusCode, text }));
+          },
+        );
+        req.on('error', (err) => resolve({ status: 0, text: String(err && err.code) }));
+        req.write(head);
+        for (let i = 0; i < 8; i++) req.write('x'.repeat(1000));
+        req.end(tail);
+      });
+
+    const viaOwner = await sendChunked('/api/files/upload', { Cookie: owner.cookie, 'X-Requested-With': 'fetch', Origin: app.base });
+    assert.equal(viaOwner.status, 413, 'owner chunked upload refused');
+    const viaLink = await sendChunked(`${link.uploadPath}/upload`, {});
+    assert.equal(viaLink.status, 413, 'link chunked upload refused');
+    assert.equal((await listFiles(app, owner.cookie)).data.files.length, 0, 'nothing was stored');
+  });
+});
