@@ -218,6 +218,23 @@ Errors on the upload route: `404` for an unknown, revoked, or wrong token; `507 
 
 The stored file records `linkId` only. The uploader's address is never stored.
 
+## Tube
+
+Channels and published videos. All routes need a session; writes also need `X-Requested-With: fetch`. Every response is the usual `{ success, data }` envelope.
+
+| Method and path | Body | Success |
+| --- | --- | --- |
+| `GET /api/tube/feed` | none | `200`, `data.videos`: every published video, newest first. Rows carry `fileId, owner, channelName, channelLogoUrl, title, description, thumbnailUrl, mime, size, publishedAt`. |
+| `GET /api/tube/my-channel` | none | `200`, `data.channel` (or `null`). |
+| `PUT /api/tube/my-channel` | JSON: `{"name", "description?", "logoFileId?"}` | `200`, `data.channel`. `name` is 1-80 characters, `description` at most 500; `logoFileId` must be an image file you own. |
+| `GET /api/tube/channels/<username>` | none | `200`, `data: { channel, videos }`, or `404` when there is no such channel. |
+| `POST /api/tube/videos/<fileId>/publish` | JSON: `{"title", "description?", "thumbnailFileId?"}` | `201` on first publish, `200` on update, `data.video`. The file must be yours and its stored type `video/*`; the thumbnail must be an image you own. |
+| `POST /api/tube/videos/<fileId>/unpublish` | none | `200`, `data.ok`. Only the owner; anyone else gets the same `404` as a missing video. |
+
+Page shells (same React app as `/home`): `GET /tube`, `GET /tube/watch/<fileId>` (404 when not published), `GET /tube/channel/<username>`.
+
+**Access rule:** a file that is published as a video, used as a video thumbnail, or in use as a channel logo can be streamed by any signed-in user through the normal `GET /api/files/<id>/preview` and `/download` endpoints (read-only). Unpublished files keep the owner-only rules. Channel and video data live in one JSON document, `system/tube.json`, in the private data repository.
+
 ## Status codes at a glance
 
 | Code | Meaning in this API |

@@ -1,5 +1,6 @@
 // The explorer: uploads, URL imports, the file list with previews, and upload links.
 // A React port of the old dashboard client with the same behavior and API calls.
+// Videos can also be published to Tube here (title, description, thumbnail, unpublish).
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, messageOf, fmtSize, fmtDate, fmtLimit, copyText } from './api.js';
 import { useNotify } from './notify.jsx';
@@ -7,6 +8,95 @@ import { useTasks, TaskList } from './tasks.jsx';
 import { uploadFiles } from './chunked.js';
 import { restoreImports, importFromUrl } from './imports.js';
 import { PreviewModal } from './preview.jsx';
+
+// The publish dialog: title, description, and a thumbnail picked from the owner's images.
+// The thumbnail selector pre-selects an image named "<video name>.thumb.jpg" when the uploader's
+// auto-capture stored one, else falls back to no thumbnail (the video still gets the dark gradient).
+function PublishDialog({ file, images, known, onClose, onDone }) {
+  const notify = useNotify();
+  const [title, setTitle] = useState(file.name.replace(/\.[A-Za-z0-9]+$/, '') || file.name);
+  const [description, setDescription] = useState(known ? known.description || '' : '');
+  const [thumb, setThumb] = useState('');
+  const [busy, setBusy] = useState(false);
+  const dialogRef = useRef(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog && typeof dialog.showModal === 'function') dialog.showModal();
+    return () => {
+      if (dialog && dialog.open) dialog.close();
+    };
+  }, []);
+
+  // Pre-select the auto-captured thumbnail, when one is there. Runs once the images list is known.
+  useEffect(() => {
+    if (thumb || !images.length) return;
+    const suggested = images.find((f) => f.name === file.name + '.thumb.jpg');
+    if (suggested) setThumb(suggested.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [images]);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    try {
+      const body = { title: title.trim(), description: description.trim() };
+      if (thumb) body.thumbnailFileId = thumb;
+      const result = await api('/api/tube/videos/' + file.id + '/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!result.ok) {
+        notify('error', 'Could not publish ' + file.name + ': ' + messageOf(result), result.status === 401);
+        return;
+      }
+      notify('success', file.name + ' is now on Tube.');
+      onDone();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <dialog ref={dialogRef} className="tube-modal" aria-labelledby="tube-publish-title" onClose={onClose}>
+      <h2 id="tube-publish-title">Publish to Tube</h2>
+      <form onSubmit={submit}>
+        <label>
+          Title
+          <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={120} required autoFocus />
+        </label>
+        <label>
+          Description (optional)
+          <textarea value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} />
+        </label>
+        <label>
+          Thumbnail (optional)
+          <select value={thumb} onChange={(e) => setThumb(e.target.value)}>
+            <option value="">No thumbnail</option>
+            {images.map((img) => (
+              <option key={img.id} value={img.id}>
+                {img.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="tube-hint">
+          Video uploads capture a frame automatically as “<strong>{file.name}.thumb.jpg</strong>” when the browser can.
+        </p>
+        <div className="row">
+          <button type="button" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button type="submit" className="tube-btn primary" disabled={busy}>
+            {busy ? 'Publishing…' : 'Publish'}
+          </button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
 
 function QuotaText({ quota }) {
   // maxFiles is unlimited (Infinity) on the server, which JSON turns into null; show the count only then.
@@ -87,6 +177,10 @@ export default function ExplorePage({ user, filesEnabled, maxBytes, linkMaxFiles
   const [linkLabel, setLinkLabel] = useState('');
   const [urlValue, setUrlValue] = useState('');
 
+  // Tube: my published videos (fileId -> row), plus the publish dialog state.
+  const [published, setPublished] = useState(null);
+  const [publishFile, setPublishFile] = useState(null);
+
   const pickerRef = useRef(null);
   const stateRef = useRef(null);
   stateRef.current = { search, category };
@@ -127,6 +221,20 @@ export default function ExplorePage({ user, filesEnabled, maxBytes, linkMaxFiles
     setLinks(list);
   }, []);
 
+  // Which of my videos are published? The feed is public to signed-in users; we keep only our rows.
+  const loadPublished = useCallback(async () => {
+    const result = await api('/api/tube/feed');
+    if (!result.ok) {
+      setPublished(null);
+      return;
+    }
+    const mine = {};
+    for (const row of result.body.data.videos || []) {
+      if (row.owner === user.username) mine[row.fileId] = row;
+    }
+    setPublished(mine);
+  }, [user.username]);
+
   const importDeps = { add, notify, loadFiles };
   const uploadDeps = { maxBytes, add, onFinished: loadFiles, notify };
 
@@ -137,6 +245,7 @@ export default function ExplorePage({ user, filesEnabled, maxBytes, linkMaxFiles
       firstRender.current = false;
       loadFiles();
       loadLinks();
+      loadPublished();
       restoreImports(importDeps);
       return undefined;
     }
@@ -176,6 +285,18 @@ export default function ExplorePage({ user, filesEnabled, maxBytes, linkMaxFiles
     if (result.ok) notify('success', file.name + ' deleted.');
     else notify('error', 'Could not delete ' + file.name + ': ' + messageOf(result), result.status === 401);
     loadFiles();
+  }
+
+  async function unpublishVideo(file) {
+    const result = await api('/api/tube/videos/' + file.id + '/unpublish', { method: 'POST' });
+    if (result.ok) notify('success', file.name + ' is no longer on Tube.');
+    else notify('error', 'Could not unpublish ' + file.name + ': ' + messageOf(result), result.status === 401);
+    loadPublished();
+  }
+
+  function afterPublish() {
+    setPublishFile(null);
+    loadPublished();
   }
 
   async function revokeLink(link) {
@@ -369,6 +490,11 @@ export default function ExplorePage({ user, filesEnabled, maxBytes, linkMaxFiles
                   </span>
                   {file.viaLink ? <span className="badge">From upload link</span> : null}
                   {file.status === 'deleting' ? <span className="badge">Deleting…</span> : null}
+                  {file.category === 'video' && published && published[file.id] ? (
+                    <a className="badge public" href={'/tube/watch/' + file.id} style={{ textDecoration: 'none' }}>
+                      Published
+                    </a>
+                  ) : null}
                 </td>
                 <td data-label="Type">{file.type.split(';')[0]}</td>
                 <td data-label="Size">{fmtSize(file.size)}</td>
@@ -403,6 +529,21 @@ export default function ExplorePage({ user, filesEnabled, maxBytes, linkMaxFiles
                         {file.visibility === 'public' ? 'Stop sharing' : 'Share'}
                       </button>
                     ) : null}
+                    {file.category === 'video' && file.status !== 'deleting' ? (
+                      published && published[file.id] ? (
+                        <button
+                          type="button"
+                          aria-label={'Unpublish ' + file.name}
+                          onClick={() => unpublishVideo(file)}
+                        >
+                          Unpublish
+                        </button>
+                      ) : (
+                        <button type="button" aria-label={'Publish ' + file.name} onClick={() => setPublishFile(file)}>
+                          Publish
+                        </button>
+                      )
+                    ) : null}
                     <button
                       type="button"
                       className="danger"
@@ -421,6 +562,16 @@ export default function ExplorePage({ user, filesEnabled, maxBytes, linkMaxFiles
       </section>
 
       <PreviewModal file={previewFile} onClose={() => setPreviewFile(null)} />
+
+      {publishFile ? (
+        <PublishDialog
+          file={publishFile}
+          images={(files || []).filter((f) => f.category === 'image' && f.status !== 'deleting')}
+          known={published ? published[publishFile.id] : null}
+          onClose={() => setPublishFile(null)}
+          onDone={afterPublish}
+        />
+      ) : null}
 
       <section aria-labelledby="links-title" id="links">
         <h2 id="links-title">Upload links</h2>

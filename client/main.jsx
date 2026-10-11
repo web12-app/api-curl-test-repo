@@ -4,9 +4,10 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { api } from './api.js';
 import { NoticesProvider } from './notify.jsx';
-import { BoxIcon, HomeIcon, CompassIcon, LogoutIcon, UserIcon } from './icons.jsx';
+import { BoxIcon, HomeIcon, CompassIcon, LogoutIcon, UserIcon, PlayIcon } from './icons.jsx';
 import HomePage from './Home.jsx';
 import ExplorePage from './Explore.jsx';
+import TubePage from './Tube.jsx';
 
 function TopNav({ page, username }) {
   async function logout(e) {
@@ -29,6 +30,7 @@ function TopNav({ page, username }) {
       <div className="nav-links">
         {link('/home', 'home', <HomeIcon />, 'Home')}
         {link('/explore', 'explore', <CompassIcon />, 'Explore')}
+        {link('/tube', 'tube', <PlayIcon size={16} />, 'Tube')}
       </div>
       <div className="nav-right">
         <span className="user-chip" title="Signed in">
@@ -45,12 +47,14 @@ function TopNav({ page, username }) {
 }
 
 function App({ boot }) {
+  // Every Tube screen (feed, watch, channel) highlights the one Tube nav link.
+  const active = typeof boot.page === 'string' && boot.page.indexOf('tube') === 0 ? 'tube' : boot.page;
   return (
     <NoticesProvider>
-      <TopNav page={boot.page} username={boot.user.username} />
+      <TopNav page={active} username={boot.user.username} />
       {boot.page === 'home' ? (
         <HomePage user={boot.user} filesEnabled={boot.filesEnabled} maxBytes={boot.maxBytes} />
-      ) : (
+      ) : boot.page === 'explore' ? (
         <ExplorePage
           user={boot.user}
           filesEnabled={boot.filesEnabled}
@@ -58,6 +62,8 @@ function App({ boot }) {
           linkMaxFiles={boot.linkMaxFiles}
           linkMaxBytes={boot.linkMaxBytes}
         />
+      ) : (
+        <TubePage boot={boot} />
       )}
     </NoticesProvider>
   );
