@@ -1,0 +1,166 @@
+# Run the app on a GitHub runner and expose it through the ngrok domain. Start it manually, any time.
+#
+# Only one ngrok agent can hold the domain at a time. Stop any other tunnel on the domain first, or this run fails.
+# The run ends after the number of minutes you enter (1-300), or sooner if the app or tunnel stops.
+#
+# Secrets (Settings > Secrets and variables > Actions > Secrets):
+#   NGROK_AUTHTOKEN     ngrok auth token
+#   PRIVATE_DATA_TOKEN  GitHub token with read/write access to the private data repo only
+#   SESSION_SECRET      at least 32 random characters
+# Nothing secret is printed. The job summary shows only the public URL and the run status.
+
+name: Live app on ngrok
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long to keep the tunnel open (1-300)"
+        required: true
+        default: "60"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-tunnel
+  cancel-in-progress: false
+
+env:
+  NGROK_DOMAIN: precision-pledge-fled.ngrok-free.dev
+  PRIVATE_DATA_REPO: web12-app/api-curl-private-data
+  # Browser origins allowed to call /api/. Exact origin, no path, no wildcard.
+  CORS_ALLOWED_ORIGINS: https://precision-pledge-fled.ngrok-free.dev
+  # ngrok agent download, pinned by SHA-256. A new ngrok release changes the hash and fails the run until this is updated.
+  NGROK_SHA256: cec0b4997fcc5f529dfc74bac89050354d11a915f968720600039738fdf330cf
+  APP_PORT: "3000"
+
+jobs:
+  live:
+    name: Run app and tunnel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - name: Check inputs and secrets
+        env:
+          MINUTES: ${{ inputs.minutes }}
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+        run: |
+          set -uo pipefail
+          failed=0
+          if ! [[ "$MINUTES" =~ ^[0-9]+$ ]] || [ "$MINUTES" -lt 1 ] || [ "$MINUTES" -gt 300 ]; then
+            echo "::error::minutes must be a whole number from 1 to 300."
+            failed=1
+          fi
+          [ -n "$NGROK_AUTHTOKEN" ] || { echo "::error::Secret NGROK_AUTHTOKEN is not set."; failed=1; }
+          [ -n "$PRIVATE_DATA_TOKEN" ] || { echo "::error::Secret PRIVATE_DATA_TOKEN is not set."; failed=1; }
+          [ "${#SESSION_SECRET}" -ge 32 ] || { echo "::error::Secret SESSION_SECRET is missing or shorter than 32 characters."; failed=1; }
+          exit "$failed"
+
+      - name: Check out code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Run tests
+        run: npm test
+
+      - name: Install ngrok
+        run: |
+          set -euo pipefail
+          curl -sSL -o ngrok.tgz https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+          echo "${NGROK_SHA256}  ngrok.tgz" | sha256sum -c -
+          mkdir -p "$HOME/bin"
+          tar -xzf ngrok.tgz -C "$HOME/bin"
+          rm -f ngrok.tgz
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Start app
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+        run: |
+          set -uo pipefail
+          # Config comes from the environment only. The app never logs secret values.
+          PORT="$APP_PORT" TRUST_PROXY=1 nohup npm start > app.log 2>&1 &
+          echo $! > app.pid
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$APP_PORT/api/health") || code=000
+            if [ "$code" = "200" ]; then
+              echo "App is up locally (attempt $attempt)."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::The app did not start (last HTTP status: $code)."
+          exit 1
+
+      - name: Start ngrok tunnel
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+        run: |
+          set -uo pipefail
+          ngrok config add-authtoken "$NGROK_AUTHTOKEN" > /dev/null
+          nohup ngrok http "$APP_PORT" --url="https://$NGROK_DOMAIN" --log=stdout > ngrok.log 2>&1 &
+          echo $! > ngrok.pid
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'ngrok-skip-browser-warning: 1' "https://$NGROK_DOMAIN/api/health") || code=000
+            if [ "$code" = "200" ]; then
+              echo "Tunnel is live (attempt $attempt)."
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::The tunnel did not come up (last HTTP status: $code). Check that no other tunnel is using $NGROK_DOMAIN."
+          exit 1
+
+      - name: Keep running
+        env:
+          MINUTES: ${{ inputs.minutes }}
+        run: |
+          set -uo pipefail
+          end=$(( $(date +%s) + MINUTES * 60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            if ! kill -0 "$(cat app.pid)" 2>/dev/null; then
+              echo "::error::The app stopped early."
+              exit 1
+            fi
+            if ! kill -0 "$(cat ngrok.pid)" 2>/dev/null; then
+              echo "::error::The tunnel stopped early."
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "Time is up. Stopping."
+
+      - name: Stop processes
+        if: always()
+        run: |
+          for f in app.pid ngrok.pid; do
+            if [ -f "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi
+          done
+          echo "Stopped."
+
+      - name: Write summary
+        if: always()
+        env:
+          RUN_OUTCOME: ${{ job.status }}
+          REQUESTED_MINUTES: ${{ inputs.minutes }}
+        run: |
+          {
+            echo "## Live app on ngrok"
+            echo ""
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Public URL | https://${NGROK_DOMAIN} |"
+            echo "| Minutes requested | ${REQUESTED_MINUTES} |"
+            echo "| Job status | ${RUN_OUTCOME} |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"

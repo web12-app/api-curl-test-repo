@@ -42,6 +42,7 @@ Set these in the environment. Never put values in the repo. See `.env.example`.
 | `COOKIE_SECURE` | no | Set `0` only for plain-http local runs |
 | `TRUST_PROXY` | no | Set `1` only behind a proxy that overwrites `X-Forwarded-For` |
 | `PORT` | no | Default 3000 |
+| `CORS_ALLOWED_ORIGINS` | no | Comma-separated exact origins (for example `https://host.example`) allowed to call `/api/` from a browser with cookies. No wildcard. Empty means no cross-origin access |
 
 Generate a session secret with `openssl rand -hex 32`.
 
