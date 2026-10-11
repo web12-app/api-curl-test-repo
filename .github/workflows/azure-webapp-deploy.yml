@@ -1,0 +1,213 @@
+# Build, test, and deploy the Node.js app to an Azure Web App (Linux, Node 22 LTS).
+#
+# Runs on every push to `main` and on manual runs (Actions > this workflow > Run workflow).
+# The deploy job runs only when the build and tests pass, and only for `main`.
+#
+# Required configuration (see docs/azure-deployment.md):
+#   - Repository VARIABLE  AZURE_WEBAPP_NAME              (the Azure Web App name; not a secret)
+#   - Repository SECRET    AZURE_WEBAPP_PUBLISH_PROFILE   (full publish profile XML from Azure)
+#
+# App settings (SESSION_SECRET, GITHUB_TOKEN, PRIVATE_DATA_REPO, ...) live in the Azure Web App,
+# not in this file. Nothing secret is printed by this workflow.
+
+name: Build, test, and deploy to Azure Web App
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only repository access. No job needs write access or OIDC tokens.
+permissions:
+  contents: read
+
+# One deployment at a time. Let a running deployment finish instead of cancelling it mid-way.
+concurrency:
+  group: azure-webapp-deploy
+  cancel-in-progress: false
+
+env:
+  AZURE_WEBAPP_NAME: ${{ vars.AZURE_WEBAPP_NAME }}
+  NODE_VERSION: "22"
+  PACKAGE_DIR: deploy-package
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Check required files
+        run: |
+          set -euo pipefail
+          for path in package.json package-lock.json src/server.js test; do
+            if [ ! -e "$path" ]; then
+              echo "::error::Required file or folder is missing: $path"
+              exit 1
+            fi
+          done
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        # The lock file pins the exact dependency tree. The app has no runtime dependencies today.
+        run: npm ci
+
+      - name: Build
+        # No bundling step. Check that every source file parses, and run any "build" script if one is added.
+        run: |
+          set -euo pipefail
+          find src test -name '*.js' -print0 | xargs -0 -n1 node --check
+          npm run build --if-present
+
+      - name: Run tests
+        # The tests use in-memory storage and a fake GitHub client. They need no secrets and no network access.
+        run: npm test
+
+      - name: Assemble deployment package
+        run: |
+          set -euo pipefail
+          rm -rf "$PACKAGE_DIR"
+          mkdir -p "$PACKAGE_DIR"
+          # Only what the server needs at runtime. Excludes tests, docs, the Pages site, and any .env file.
+          cp package.json package-lock.json "$PACKAGE_DIR"/
+          cp -r src "$PACKAGE_DIR"/src
+
+          # Verify the package before it is uploaded: the start script must exist, and it must contain no env files.
+          (cd "$PACKAGE_DIR" && node -e "const p=require('./package.json'); if(!p.scripts||!p.scripts.start){process.exit(1)}; require('./src/server.js'); console.log('start script:', p.scripts.start)")
+          if [ -n "$(find "$PACKAGE_DIR" -name '.env*' -print -quit)" ]; then
+            echo "::error::An environment file was found in the deployment package. Remove it from the repository."
+            exit 1
+          fi
+          echo "Package contents:"
+          find "$PACKAGE_DIR" -type f | sort
+
+      - name: Upload deployment package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: azure-webapp-package
+          path: ${{ env.PACKAGE_DIR }}
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    name: Deploy to Azure Web App
+    needs: build
+    # Deploy only from main, even when the workflow is started manually from another branch.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.webapp-url }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check deployment configuration
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        run: |
+          set -uo pipefail
+          failed=0
+
+          if [ -z "$AZURE_WEBAPP_NAME" ]; then
+            echo "::error::Repository variable AZURE_WEBAPP_NAME is not set. Add it under Settings > Secrets and variables > Actions > Variables."
+            failed=1
+          elif ! [[ "$AZURE_WEBAPP_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,58}[A-Za-z0-9]$ ]]; then
+            echo "::error::AZURE_WEBAPP_NAME is not a valid Azure Web App name (letters, digits, and hyphens; 2-60 characters)."
+            failed=1
+          else
+            echo "Target Azure Web App: $AZURE_WEBAPP_NAME"
+          fi
+
+          if [ -z "$PUBLISH_PROFILE" ]; then
+            echo "::error::Repository secret AZURE_WEBAPP_PUBLISH_PROFILE is not set. Add the full publish profile XML under Settings > Secrets and variables > Actions > Secrets."
+            failed=1
+          elif ! printf '%s' "$PUBLISH_PROFILE" | grep -q '<publishData'; then
+            echo "::error::AZURE_WEBAPP_PUBLISH_PROFILE does not look like a publish profile (expected XML containing <publishData>)."
+            failed=1
+          else
+            echo "Publish profile secret is present."
+          fi
+
+          exit "$failed"
+
+      - name: Download deployment package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: azure-webapp-package
+          path: ${{ env.PACKAGE_DIR }}
+
+      - name: Deploy to Azure Web App
+        id: deploy
+        uses: azure/webapps-deploy@02a81bead70021f5284939794bcec79c271ab383 # v3.0.8
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: ${{ env.PACKAGE_DIR }}
+          restart: "true"
+
+      - name: Wait for the health check
+        id: health
+        env:
+          WEBAPP_URL: ${{ steps.deploy.outputs.webapp-url }}
+        run: |
+          set -uo pipefail
+          if [ -z "$WEBAPP_URL" ]; then
+            echo "::error::The deploy step did not return a web app URL."
+            exit 1
+          fi
+          url="${WEBAPP_URL%/}/api/health"
+          echo "Checking $url"
+          code=000
+          for attempt in $(seq 1 15); do
+            code=$(curl -s -o health-response.txt -w '%{http_code}' --max-time 20 "$url") || code=000
+            if [ "$code" = "200" ]; then
+              echo "Health check passed on attempt $attempt."
+              echo "status=passed" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Attempt $attempt: HTTP $code. Waiting for the app to start."
+            sleep 15
+          done
+          echo "::error::Health check failed (last HTTP status: $code)."
+          echo "Response body (first 500 bytes):"
+          head -c 500 health-response.txt 2>/dev/null || true
+          echo ""
+          echo "Common causes: app settings missing, the app failed to start (see Log stream in Azure), or GitHub storage unreachable."
+          echo "status=failed" >> "$GITHUB_OUTPUT"
+          exit 1
+
+      - name: Write deployment summary
+        if: always()
+        env:
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          HEALTH_OUTCOME: ${{ steps.health.outcome }}
+          WEBAPP_URL: ${{ steps.deploy.outputs.webapp-url }}
+        run: |
+          {
+            echo "## Azure Web App deployment"
+            echo ""
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| App name | ${AZURE_WEBAPP_NAME:-not set} |"
+            echo "| Commit | ${GITHUB_SHA} |"
+            echo "| Deploy step | ${DEPLOY_OUTCOME:-skipped} |"
+            echo "| Health check | ${HEALTH_OUTCOME:-skipped} |"
+            echo "| Web app URL | ${WEBAPP_URL:-not available} |"
+            echo ""
+            if [ "${HEALTH_OUTCOME}" = "success" ]; then
+              echo "**Status: deployed and healthy.**"
+            else
+              echo "**Status: not healthy. See the Deploy and Health check steps.**"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
