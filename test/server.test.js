@@ -25,7 +25,7 @@ test('GET / returns the home page as HTML with login links', async () => {
   assert.equal(res.status, 200);
   assert.match(res.headers.get('content-type'), /text\/html/);
   const html = await res.text();
-  assert.match(html, /Hello from Node\.js/);
+  assert.match(html, /Get started/);
   assert.match(html, /href="\/login"/);
   assert.match(html, /href="\/signup"/);
 });
@@ -181,12 +181,15 @@ test('repeated wrong logins for one account get rate limited', async () => {
 
 // ---- browser pages and form posts
 
-test('the dashboard redirects to login without a session and shows the user with one', async () => {
+test('the app home redirects anonymous visitors to login and shows the user with a session', async () => {
   const s = await startServer();
   try {
     const anon = await fetch(`${s.base}/dashboard`, noRedirect);
     assert.equal(anon.status, 303);
-    assert.equal(anon.headers.get('location'), '/login');
+    assert.equal(anon.headers.get('location'), '/home');
+    const anonHome = await fetch(`${s.base}/home`, noRedirect);
+    assert.equal(anonHome.status, 303);
+    assert.equal(anonHome.headers.get('location'), '/login');
 
     const form = new URLSearchParams({ username: 'liam_5', password: 'password-one' });
     const signed = await fetch(`${s.base}/signup`, {
@@ -196,11 +199,16 @@ test('the dashboard redirects to login without a session and shows the user with
       body: form,
     });
     assert.equal(signed.status, 303);
-    assert.equal(signed.headers.get('location'), '/dashboard');
+    assert.equal(signed.headers.get('location'), '/home');
 
-    const page = await fetch(`${s.base}/dashboard`, { headers: { Cookie: sessionFrom(signed) } });
+    const page = await fetch(`${s.base}/home`, { headers: { Cookie: sessionFrom(signed) } });
     assert.equal(page.status, 200);
     assert.match(await page.text(), /liam_5/);
+
+    // A signed-in visitor never sees the welcome page: / goes straight to the app home.
+    const welcome = await fetch(`${s.base}/`, { headers: { Cookie: sessionFrom(signed) }, redirect: 'manual' });
+    assert.equal(welcome.status, 303);
+    assert.equal(welcome.headers.get('location'), '/home');
   } finally {
     await s.close();
   }

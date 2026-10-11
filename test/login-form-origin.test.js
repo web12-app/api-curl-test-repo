@@ -52,7 +52,7 @@ async function signupViaApi(base, username, password) {
 
 test('every page sends a Referrer-Policy that keeps the Origin header a real origin on form posts', async () => {
   await withServer(PROD_ENV, async (s) => {
-    for (const path of ['/', '/login', '/signup', '/dashboard', '/api/health', '/does-not-exist']) {
+    for (const path of ['/', '/home', '/explore', '/login', '/signup', '/dashboard', '/api/health', '/does-not-exist']) {
       const res = await fetch(`${s.base}${path}`, { redirect: 'manual' });
       assert.equal(res.headers.get('referrer-policy'), 'same-origin', `${path} sends a usable Referrer-Policy`);
     }
@@ -68,7 +68,7 @@ test('the 403 scenario: the login form post from the login page is not refused',
       { username: 'form_login_user', password: 'password-one' }, { Origin: origin });
     assert.notEqual(res.status, 403, 'a same-origin form post must not be refused');
     assert.equal(res.status, 303);
-    assert.equal(res.headers.get('location'), '/dashboard');
+    assert.equal(res.headers.get('location'), '/home');
     assert.match(sessionFrom(res) || '', /^session=/);
   });
 });
@@ -116,12 +116,12 @@ test('the production origin is accepted for signup, login, and logout forms', as
     const signup = await postForm(s.base, '/signup',
       { username: 'prod_form_user', password: 'password-one' }, { Origin: origin });
     assert.equal(signup.status, 303);
-    assert.equal(signup.headers.get('location'), '/dashboard');
+    assert.equal(signup.headers.get('location'), '/home');
 
     const login = await postForm(s.base, '/login',
       { username: 'prod_form_user', password: 'password-one' }, { Origin: origin });
     assert.equal(login.status, 303);
-    assert.equal(login.headers.get('location'), '/dashboard');
+    assert.equal(login.headers.get('location'), '/home');
 
     const logout = await postForm(s.base, '/logout', {}, { Origin: origin, Cookie: sessionFrom(login) });
     assert.equal(logout.status, 303);
@@ -130,7 +130,7 @@ test('the production origin is accepted for signup, login, and logout forms', as
   });
 });
 
-test('browser-style flow: login form, session cookie accepted, dashboard shown, logout', async () => {
+test('browser-style flow: login form, session cookie accepted, home shown, logout', async () => {
   await withServer(PROD_ENV, async (s) => {
     await signupViaApi(s.base, 'flow_user', 'password-one');
 
@@ -140,9 +140,9 @@ test('browser-style flow: login form, session cookie accepted, dashboard shown, 
     const login = await postForm(s.base, '/login',
       { username: 'flow_user', password: 'password-one' }, { Origin: origin });
     assert.equal(login.status, 303, 'successful login redirects');
-    assert.equal(login.headers.get('location'), '/dashboard');
+    assert.equal(login.headers.get('location'), '/home');
 
-    // 2. The cookie keeps its settings: HttpOnly, SameSite=Lax, Secure.
+    // 3. The cookie keeps its settings: HttpOnly, SameSite=Lax, Secure.
     const setCookie = login.headers.get('set-cookie') || '';
     assert.match(setCookie, /HttpOnly/);
     assert.match(setCookie, /SameSite=Lax/);
@@ -150,10 +150,13 @@ test('browser-style flow: login form, session cookie accepted, dashboard shown, 
     const cookie = sessionFrom(login);
     assert.ok(cookie);
 
-    // 3. The dashboard accepts the cookie and shows the username.
-    const dash = await fetch(`${s.base}/dashboard`, { headers: { Cookie: cookie }, redirect: 'manual' });
+    // 3. The app home accepts the cookie and shows the username. The old dashboard link lands there too.
+    const dash = await fetch(`${s.base}/home`, { headers: { Cookie: cookie }, redirect: 'manual' });
     assert.equal(dash.status, 200);
     assert.match(await dash.text(), /flow_user/);
+    const oldDash = await fetch(`${s.base}/dashboard`, { headers: { Cookie: cookie }, redirect: 'manual' });
+    assert.equal(oldDash.status, 303);
+    assert.equal(oldDash.headers.get('location'), '/home');
 
     // 4. The data API reports the same user with the cookie, and no one without it.
     const withCookie = await (await fetch(`${s.base}/api/me`, { headers: { Cookie: cookie } })).json();
@@ -161,9 +164,12 @@ test('browser-style flow: login form, session cookie accepted, dashboard shown, 
     const without = await (await fetch(`${s.base}/api/me`)).json();
     assert.equal(without.data.user, null);
 
-    // 5. Dashboard without a session redirects to login.
-    const anon = await fetch(`${s.base}/dashboard`, { redirect: 'manual' });
+    // 5. The home page and the old dashboard link redirect anonymous visitors to login.
+    const anon = await fetch(`${s.base}/home`, { redirect: 'manual' });
     assert.equal(anon.status, 303);
     assert.equal(anon.headers.get('location'), '/login');
+    const anonOld = await fetch(`${s.base}/dashboard`, { redirect: 'manual' });
+    assert.equal(anonOld.status, 303);
+    assert.equal(anonOld.headers.get('location'), '/home');
   });
 });

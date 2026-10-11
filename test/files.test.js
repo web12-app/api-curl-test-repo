@@ -586,7 +586,7 @@ test('logout ends the session on the server: a copied cookie stops working in ev
     // Both the logged-out cookie and the other device's cookie are refused.
     assert.equal((await (await authed(app, first, '/api/me')).json()).data.user, null);
     assert.equal((await (await authed(app, second.cookie, '/api/me')).json()).data.user, null);
-    assert.equal((await authed(app, second.cookie, '/dashboard', { redirect: 'manual' })).status, 303);
+    assert.equal((await authed(app, second.cookie, '/home', { redirect: 'manual' })).status, 303);
     assert.equal((await listFiles(app, second.cookie).then((r) => r.status)), 401);
 
     // A new login works.
@@ -606,7 +606,7 @@ test('file routes say which setting is missing when storage is not configured, a
     assert.equal(body.error.code, 'FILES_NOT_CONFIGURED');
     assert.match(body.error.message, /GITHUB_OWNER/);
     assert.doesNotMatch(body.error.message, /ghp_|private-data/);
-    const dash = await authed(app, user.cookie, '/dashboard');
+    const dash = await authed(app, user.cookie, '/explore');
     assert.match(await dash.text(), /File storage is not set up/);
   });
 });
@@ -619,11 +619,11 @@ test('the storage repository cannot be the same as the private data repository',
   assert.match(loaded.missing[0], /must differ/);
 });
 
-test('the dashboard page has the upload and list UI, and contains no GitHub details', async () => {
+test('the explore page has the upload and list UI, and contains no GitHub details', async () => {
   await withApp({}, async (app) => {
     const user = await signup(app);
     await upload(app, user.cookie, 'listed.txt', 'data');
-    const res = await authed(app, user.cookie, '/dashboard');
+    const res = await authed(app, user.cookie, '/explore');
     assert.equal(res.status, 200);
     const html = await res.text();
     for (const marker of ['id="drop"', 'id="picker"', 'id="files"', 'id="search"', 'id="category"', 'X-Requested-With']) {
@@ -632,9 +632,14 @@ test('the dashboard page has the upload and list UI, and contains no GitHub deta
     assert.doesNotMatch(html, /ghp_|api\.github|uploads\.github|upload-[a-f0-9]{8}|assetId/);
     assert.match(html, new RegExp(user.username));
     assert.doesNotMatch(html, /listed\.txt/, 'the page loads the list itself; it is not rendered into the HTML');
-    const anon = await fetch(`${app.base}/dashboard`, { redirect: 'manual' });
+    const anon = await fetch(`${app.base}/explore`, { redirect: 'manual' });
     assert.equal(anon.status, 303);
     assert.equal(anon.headers.get('location'), '/login');
+    // The home page shows no file list: no table and no upload queue.
+    const home = await authed(app, user.cookie, '/home');
+    const homeHtml = await home.text();
+    assert.match(homeHtml, new RegExp(user.username));
+    assert.doesNotMatch(homeHtml, /id="files"|id="drop"|id="search"/);
   });
 });
 

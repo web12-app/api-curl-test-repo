@@ -279,8 +279,11 @@ const logoutHeader = (ctx) => clearSessionCookie({ secure: ctx.auth.enabled ? ct
 
 // ---- pages
 
+// The public welcome page. A signed-in visitor never sees it: they go straight to the app home page.
 async function pageHome(ctx) {
-  sendHtml(ctx.res, 200, pages.homePage(await currentUser(ctx)));
+  const user = await currentUser(ctx);
+  if (user) return redirect(ctx.res, '/home');
+  sendHtml(ctx.res, 200, pages.welcomePage());
 }
 
 function pageAuthForm(mode) {
@@ -291,7 +294,16 @@ function pageAuthForm(mode) {
   };
 }
 
-async function pageDashboard(ctx) {
+// The app home page: overview, stats, quick actions. No file list here - that lives on /explore.
+async function pageAppHome(ctx) {
+  requireConfigured(ctx);
+  const user = await currentUser(ctx);
+  if (!user) return redirect(ctx.res, '/login');
+  sendHtml(ctx.res, 200, pages.appHomePage(user, { filesEnabled: ctx.auth.files.enabled }));
+}
+
+// The file explorer: uploads, the file list, and upload links.
+async function pageExplore(ctx) {
   requireConfigured(ctx);
   const user = await currentUser(ctx);
   if (!user) return redirect(ctx.res, '/login');
@@ -299,7 +311,7 @@ async function pageDashboard(ctx) {
   sendHtml(
     ctx.res,
     200,
-    pages.dashboardPage(user, {
+    pages.explorePage(user, {
       filesEnabled: files.enabled,
       maxBytes: files.enabled ? files.service.limits.maxFileBytes : 0,
       linkMaxFiles: files.enabled ? files.service.limits.linkMaxFiles : 0,
@@ -308,20 +320,25 @@ async function pageDashboard(ctx) {
   );
 }
 
+// Old links keep working: the dashboard is now the app home page.
+async function pageDashboard(ctx) {
+  return redirect(ctx.res, '/home');
+}
+
 // ---- form posts (browser pages)
 
 async function formLogin(ctx) {
   requireConfigured(ctx);
   const body = await readForm(ctx);
   const user = await login(ctx.auth, { username: body.username, password: body.password, ip: ctx.ip });
-  redirect(ctx.res, '/dashboard', { 'Set-Cookie': await sessionHeader(ctx, user) });
+  redirect(ctx.res, '/home', { 'Set-Cookie': await sessionHeader(ctx, user) });
 }
 
 async function formSignup(ctx) {
   requireConfigured(ctx);
   const body = await readForm(ctx);
   const user = await signup(ctx.auth, { username: body.username, password: body.password, ip: ctx.ip });
-  redirect(ctx.res, '/dashboard', { 'Set-Cookie': await sessionHeader(ctx, user) });
+  redirect(ctx.res, '/home', { 'Set-Cookie': await sessionHeader(ctx, user) });
 }
 
 async function formLogout(ctx) {
@@ -785,6 +802,8 @@ const TOKEN = SHARE_TOKEN_RE.source.slice(1, -1);
 
 const ROUTES = [
   { method: 'GET', path: '/', handler: pageHome },
+  { method: 'GET', path: '/home', handler: pageAppHome },
+  { method: 'GET', path: '/explore', handler: pageExplore },
   { method: 'GET', path: '/api/health', handler: apiHealth },
   { method: 'GET', path: '/login', handler: pageAuthForm('login') },
   { method: 'GET', path: '/signup', handler: pageAuthForm('signup') },
