@@ -41,7 +41,7 @@ on:
       - main
   schedule:
     # Backbone: re-seed the service every 5 hours even if the chain ever dies.
-    # Scheduled and push runs use the default inputs above (300-minute sessions).
+    # Push and schedule runs get these defaults via the || fallbacks in the step/job env blocks below.
     - cron: "37 */5 * * *"
 
 permissions:
@@ -80,8 +80,8 @@ jobs:
     steps:
       - name: Check inputs and secrets
         env:
-          MINUTES: ${{ inputs.minutes }}
-          AUTO_RESTARTS: ${{ inputs.auto_restarts }}
+          MINUTES: ${{ inputs.minutes || '300' }}
+          AUTO_RESTARTS: ${{ inputs.auto_restarts || '24' }}
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
@@ -195,7 +195,7 @@ jobs:
       - name: Keep running
         id: keep
         env:
-          MINUTES: ${{ inputs.minutes }}
+          MINUTES: ${{ inputs.minutes || '300' }}
         run: |
           set -uo pipefail
           end=$(( $(date +%s) + MINUTES * 60 ))
@@ -286,8 +286,8 @@ jobs:
         if: always()
         env:
           KEEP_OUTCOME: ${{ steps.keep.outcome }}
-          REQUESTED_MINUTES: ${{ inputs.minutes }}
-          REQUESTED_RESTARTS: ${{ inputs.auto_restarts }}
+          REQUESTED_MINUTES: ${{ inputs.minutes || '300' }}
+          REQUESTED_RESTARTS: ${{ inputs.auto_restarts || '24' }}
           EVENT: ${{ github.event_name }}
         run: |
           {
@@ -319,8 +319,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       CURRENT_RUN_ID: ${{ github.run_id }}
-      MINUTES: ${{ inputs.minutes }}
-      AUTO_RESTARTS: ${{ inputs.auto_restarts }}
+      MINUTES: ${{ inputs.minutes || '300' }}
+      AUTO_RESTARTS: ${{ inputs.auto_restarts || '24' }}
       ELAPSED: ${{ needs.live.outputs.elapsed }}
       LIVE_RESULT: ${{ needs.live.result }}
     steps:
