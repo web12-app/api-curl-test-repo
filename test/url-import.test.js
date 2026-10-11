@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const { startFake, withApp, signup, authed, json, startOrigin, fakeDns, originTransport, waitForImport, startImport, tempFiles, storedAssets, listFiles, downloadFile, MB } = require('./files-fixture');
 
+const GB = 1024 * MB;
 const PUBLIC_IP = '93.184.216.34';
 const CDN_IP = '151.101.1.1';
 const HOST = 'files.example.test';
@@ -30,7 +31,7 @@ const send = (res, status, headers, body) => {
 const ok200 = (res, body, headers = {}) => send(res, 200, { 'Content-Type': 'application/octet-stream', ...headers }, body);
 
 // Runs fn with an origin serving `routes` (path -> handler), a fake DNS table, and an app that uses both.
-async function withImports({ routes = {}, dns, timeouts, importLimits, lookup } = {}, fn) {
+async function withImports({ routes = {}, dns, timeouts, importLimits, lookup, limits } = {}, fn) {
   const origin = await startOrigin((req, res) => {
     const path = req.url.split('?')[0];
     const handler = routes[path];
@@ -41,7 +42,7 @@ async function withImports({ routes = {}, dns, timeouts, importLimits, lookup } 
   const dnsFake = lookup ? { lookup, lookups: [] } : fakeDns(table);
   const { transport, hops } = originTransport(origin.port);
   try {
-    await withApp(fake, { urlImport: { lookup: dnsFake.lookup, transport, timeouts }, importLimits }, async (app) => {
+    await withApp(fake, { urlImport: { lookup: dnsFake.lookup, transport, timeouts }, importLimits, limits }, async (app) => {
       await fn({ app, origin, hops, dns: dnsFake });
     });
   } finally {
@@ -201,7 +202,7 @@ test('a Content-Length above the limit is refused before the body is read', asyn
     {
       routes: {
         '/huge.pdf': (req, res) => {
-          res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': String(25 * MB + 1) });
+          res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': String(2 * GB + 1) });
           res.write('%PDF-');
           res.on('error', () => {});
           res.socket.on('error', () => {});
@@ -222,6 +223,8 @@ test('a Content-Length above the limit is refused before the body is read', asyn
 test('the size limit holds while streaming, even when no length is declared', async () => {
   await withImports(
     {
+      // A small per-file limit here keeps the streamed probe tiny; the real default ceiling is 2 GB.
+      limits: { maxFileBytes: 25 * MB },
       routes: {
         '/stream.pdf': (req, res) => {
           res.writeHead(200, { 'Content-Type': 'application/pdf' }); // no Content-Length: chunked
@@ -252,7 +255,7 @@ test('the size limit holds while streaming, even when no length is declared', as
   );
 });
 
-test('a file of exactly 25 MB is imported, and the limit is not raised', async () => {
+test('a file of 25 MB is imported well under the new ceiling, byte for byte', async () => {
   const big = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(25 * MB - 9, 0x41)]);
   assert.equal(big.length, 25 * MB);
   await withImports({ routes: { '/big.pdf': (req, res) => ok200(res, big, { 'Content-Type': 'application/pdf', 'Content-Length': String(big.length) }) } }, async ({ app }) => {

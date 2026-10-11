@@ -28,6 +28,15 @@ function errorText(code) {
   return ERROR_TEXT[code] || ERROR_TEXT.INTERNAL_ERROR;
 }
 
+// A size limit for hints: whole gibibytes as GB, everything smaller as MB.
+function fmtLimit(bytes) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    const gb = bytes / (1024 * 1024 * 1024);
+    return `${Number.isInteger(gb) ? gb : gb.toFixed(1)} GB`;
+  }
+  return `${Math.floor(bytes / (1024 * 1024))} MB`;
+}
+
 const BASE_CSS = `
       body { font-family: system-ui, sans-serif; max-width: 36rem; margin: 2rem auto; padding: 0 1rem; color: #1f2328; }
       nav { display: flex; gap: 1rem; align-items: center; border-bottom: 1px solid #d0d7de; padding-bottom: .75rem; }
@@ -419,8 +428,8 @@ function explorePage(user, { filesEnabled = false, maxBytes = 0, linkMaxFiles = 
     );
   }
   const config = `<div id="dash-config" data-enabled="1" data-max-bytes="${escapeHtml(maxBytes)}" hidden></div>`;
-  const mb = escapeHtml(Math.floor(maxBytes / 1024 / 1024));
-  const linkMb = escapeHtml(Math.floor(linkMaxBytes / 1024 / 1024));
+  const mb = escapeHtml(fmtLimit(maxBytes));
+  const linkMb = escapeHtml(fmtLimit(linkMaxBytes));
   return layout(
     'Explore files',
     `<div class="profile">
@@ -438,7 +447,7 @@ function explorePage(user, { filesEnabled = false, maxBytes = 0, linkMaxFiles = 
          <p>Drag files here, or</p>
          <button type="button" id="pick">Choose files</button>
          <input type="file" id="picker" multiple hidden>
-         <p class="hint">Any file type, up to ${mb} MB per file. Images, video, audio, PDF, and text can be previewed. Other types download as files. Large files are sent in pieces: if the connection drops, choose the same file again to resume it.</p>
+         <p class="hint">Any file type, up to ${mb} per file. Images, video, audio, PDF, and text can be previewed. Other types download as files. Files of 4 MB and above are sent in pieces automatically: if the connection drops, choose the same file again to resume it.</p>
        </div>
        <form id="url-form" class="url-form">
          <label for="url-input">Upload from URL</label>
@@ -446,7 +455,7 @@ function explorePage(user, { filesEnabled = false, maxBytes = 0, linkMaxFiles = 
            <input type="text" id="url-input" name="url" inputmode="url" placeholder="Paste any file link (http, https, data:)" aria-label="Paste any file link" autocomplete="off" maxlength="16384" required spellcheck="false">
            <button type="submit" id="url-submit">Import</button>
          </div>
-         <p class="hint">Paste any direct link to a file: http:// or https:// (any port, IP address, or user:pass for private files), or a data: link, up to ${mb}. The server downloads it in the background; the link is not kept after the import finishes.</p>
+         <p class="hint">Paste any direct link to a file: http:// or https:// (any port, IP address, or user:pass for private files), or a data: link, up to ${mb}. The download runs in the background and keeps going even if you reload the page; the link is not kept after the import finishes.</p>
        </form>
        <ul id="queue" class="queue" aria-label="Uploads"></ul>
        <ul id="imports" class="queue" aria-label="Imports from URL"></ul>
@@ -488,7 +497,7 @@ function explorePage(user, { filesEnabled = false, maxBytes = 0, linkMaxFiles = 
 
      <section aria-labelledby="links-title" id="links">
        <h2 id="links-title">Upload links</h2>
-       <p class="hint">Anyone with a link can upload one file at a time to your account, with no login. Revoke a link when you no longer want it to work. Each link accepts up to ${escapeHtml(linkMaxFiles)} files and ${linkMb} MB in total. Files uploaded through a link count toward your file limit.</p>
+       <p class="hint">Anyone with a link can upload one file at a time to your account, with no login. Revoke a link when you no longer want it to work. Each link accepts up to ${escapeHtml(linkMaxFiles)} files and ${linkMb} in total. Files uploaded through a link count toward your file limit.</p>
        <form id="link-form" class="toolbar">
          <label>Label (optional)
            <input type="text" id="link-label" maxlength="60" autocomplete="off">
@@ -515,12 +524,12 @@ function explorePage(user, { filesEnabled = false, maxBytes = 0, linkMaxFiles = 
 // UUID per page load, so a repeated submit of this page is stored once.
 function uploadPage({ label, token, maxBytes }) {
   const t = escapeHtml(token);
-  const mb = escapeHtml(Math.floor(maxBytes / 1024 / 1024));
+  const mb = escapeHtml(fmtLimit(maxBytes));
   return layout(
     'Upload a file',
     `<h1>Upload a file</h1>
      ${label ? `<p>Upload link: <strong>${escapeHtml(label)}</strong></p>` : ''}
-     <p>Choose one file to send. Any file type is accepted, up to ${mb} MB. You do not need an account.</p>
+     <p>Choose one file to send. Any file type is accepted, up to ${mb}. You do not need an account.</p>
      <form method="post" enctype="multipart/form-data" action="/u/${t}/upload">
        <label>File <input type="file" name="file" required></label>
        <input type="hidden" name="uploadId" value="${escapeHtml(crypto.randomUUID())}">
@@ -563,4 +572,4 @@ function errorPage(status, message, user = null) {
   return layout(`Error ${status}`, `<h1>Error ${status}</h1><p class="error">${escapeHtml(message)}</p>`, user);
 }
 
-module.exports = { escapeHtml, errorText, welcomePage, appHomePage, explorePage, authForm, sharePage, uploadPage, uploadDonePage, errorPage };
+module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, authForm, sharePage, uploadPage, uploadDonePage, errorPage };

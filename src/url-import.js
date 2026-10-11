@@ -19,7 +19,7 @@ const DEFAULT_TIMEOUTS = {
   maxRedirects: 3,
   connectTimeoutMs: 10 * 1000, // until the response headers arrive
   idleTimeoutMs: 30 * 1000, // longest silence while the body streams
-  totalTimeoutMs: 120 * 1000, // whole import, all hops included
+  totalTimeoutMs: 30 * 60 * 1000, // whole import, all hops included; big files download for a while
 };
 const HEADERS = {
   // Only these headers leave the server. Client headers and cookies are never forwarded.

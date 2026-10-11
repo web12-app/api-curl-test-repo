@@ -17,13 +17,13 @@ The dashboard has four parts.
 
 ### 1. Usage line
 
-Shows how many files you have, for example `5 of 200 files`. There is no storage total: the only limit is the file count.
+Shows how many files you have, for example `5 files`. There is no storage total and no file count limit by default; if a count limit is ever configured it reads `5 of 200 files`.
 
 ### 2. Upload
 
 - Drag files onto the dashboard drop area, or click **Choose files**.
 - You can send several files at once. Each one appears in the **Uploads** queue with a progress bar.
-- **Any file type is accepted.** The size limit is **25 MB per file**. Larger files are refused before they are sent.
+- **Any file type is accepted.** The size ceiling is **2 GB per file** (GitHub's own release-asset limit). Files of 4 MB and more are sent in pieces automatically, so a dropped connection never restarts from zero.
 - Known types (listed in [Which files can I upload](#which-files-can-i-upload)) are checked: the file's first bytes must match its extension. A renamed file is refused with *The file contents do not match its type*.
 - Unknown types are stored and can only be **downloaded**. They never open in the browser.
 - A failed upload stays in the queue with a **Retry** link. Retrying is safe: the server stores a file once even if the first attempt partly worked.
@@ -32,7 +32,7 @@ Shows how many files you have, for example `5 of 200 files`. There is no storage
 
 ### 2a. Upload from URL
 
-- Paste a direct link to a file into **Upload from URL**, then press **Import**. The link must start with `https://`, point to a public host, and lead to a file of at most 25 MB.
+- Paste a direct link to a file into **Upload from URL**, then press **Import**. The link must start with `https://` and point to a public host. The download runs in the background: you can keep using the app, close the tab, or reload the page — the import keeps going, and the page re-attaches to it when you come back. The ceiling is the same 2 GB per file.
 - The server downloads the file in the background. The queue shows the state: waiting, downloading, saving, imported, or failed.
 - **Cancel** works while the import is waiting or downloading. A failed import keeps its **Retry** link.
 - The link is cleared from the box when you press Import, and the server does not keep it after the import finishes. Only the host name is shown.
@@ -123,10 +123,10 @@ Each link in the list shows its label, status (**Open** or **Revoked**), how man
 | --- | --- |
 | Files per link | 20 |
 | Total size per link | 500 MB |
-| Size per file | 25 MB |
+| Size per file | 2 GB |
 | Active links per account | 20 |
 
-Files from links count toward your account's 200-file limit as well. If the account limit is reached, a link upload is refused and the uploader is told.
+Files from links count toward your account's file list, and the per-file 2 GB ceiling applies to them too. If a file-count limit is ever configured for the account and it is reached, a link upload is refused and the uploader is told.
 
 ### Revoke a link
 
@@ -136,11 +136,11 @@ Click **Revoke** and confirm. The link stops working immediately: the page retur
 
 | Message | Meaning | What to do |
 | --- | --- | --- |
-| *Too large. The limit is 25 MB.* | The file is over the per-file limit. | Send a smaller file. |
+| *Too large. The limit is 2 GB.* | The file is over the per-file ceiling (GitHub's asset limit). | Store the file another way. |
 | *The file is empty.* | Zero bytes. | Choose another file. |
 | *The file contents do not match its type.* | The extension says one type, the bytes are another. | Export the file again, or rename it to its real type. |
 | *Preview is not available for this type.* | The type is not previewable. | Use **Download**. |
-| *You can keep up to 200 files.* | Account limit reached. | Delete files. |
+| *You can keep up to 200 files.* | A configured file-count limit was reached (none by default). | Delete files. |
 | *This upload link has reached its file limit* / *size limit* | The link is full. | Create a new link, or revoke this one. |
 | *This upload link is no longer active.* | The link was revoked. | Ask the owner for a new link. |
 | *The server is busy with other uploads.* | Too many uploads at once. | Wait a moment and retry. |
