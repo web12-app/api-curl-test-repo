@@ -30,9 +30,21 @@ File storage is switched on when these two variables are set. Missing values tur
 
 The app checks that the storage repo is private before it accepts any upload, and caches that answer briefly. A public storage repo gets a 503 error.
 
+## Upload settings (optional)
+
+These three variables tune the piece-by-piece upload and the temp directory. Leave them unset to use the defaults. A bad value turns file storage off, and the startup log and the file routes name the setting (never its value).
+
+| Variable | Default | Allowed values | Purpose |
+| --- | --- | --- | --- |
+| `UPLOAD_CHUNK_BYTES` | 2 MiB | Whole number from 256 KiB (262144) to 8 MiB (8388608) | Size of each piece. The browser uses the size the server returns when a session opens. |
+| `UPLOAD_SESSION_HOURS` | 24 | From 1 to 168 | How long an unfinished upload may live. Idle sessions are dropped after 2 hours with no new piece. |
+| `FILE_TEMP_DIR` | OS temp directory | An absolute path | Where pieces and in-progress files are kept. Use a persistent disk if uploads should survive a restart. It is never served over HTTP. |
+
+The 25 MB per-file cap is not one of these settings. It stays at 25 MB. A change to it needs a separate, reviewed change to the code default.
+
 ## Limits
 
-These are set in code (`src/files.js`, `DEFAULT_LIMITS`). Change them there and run the tests.
+These are set in code (`src/files.js`, `DEFAULT_LIMITS`; `src/chunked-uploads.js`, `CHUNK_LIMITS`; `src/import-jobs.js`, `IMPORT_LIMITS`; `src/url-import.js`, `DEFAULT_TIMEOUTS`). Change them there and run the tests.
 
 | Limit | Default | Where it applies |
 | --- | --- | --- |
@@ -44,6 +56,12 @@ These are set in code (`src/files.js`, `DEFAULT_LIMITS`). Change them there and 
 | Files per upload link | 20 | `linkMaxFiles` |
 | Bytes per upload link | 500 MB | `linkMaxBytes` |
 | Upload-link uploads per address per hour | 30 | `LINK_UPLOADS_PER_HOUR` (in `src/server.js`) |
+| Pieces per upload | 400 | `maxChunks`. More than this is refused with `TOO_MANY_CHUNKS`. |
+| Open piece uploads per account / on the server | 3 / 50 | `maxSessionsPerUser`, `maxSessionsTotal` |
+| Piece requests per account per hour | 6000 | `CHUNK_REQUESTS_PER_HOUR` (in `src/server.js`) |
+| URL imports running at once, server-wide / per account | 3 / 2 | `maxConcurrentImports`, `maxConcurrentPerUser` |
+| URL import starts per account per hour | 30 | `importsPerHour`. Retries count. |
+| URL import download, whole job | 120 s | `totalTimeoutMs`. Connect 10 s, silence 30 s, up to 3 redirects. |
 
 There is **no total storage quota**. The only storage limit is the file count.
 

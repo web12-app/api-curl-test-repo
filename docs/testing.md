@@ -6,7 +6,7 @@
 npm test
 ```
 
-This runs every `test/*.test.js` file with Node's built-in test runner. It needs no account, no network, and no real GitHub token. At the time of writing it runs 131 tests in about 10 seconds.
+This runs every `test/*.test.js` file with Node's built-in test runner. It needs no account, no network, and no real GitHub token. At the time of writing it runs 212 tests in about 20 seconds.
 
 Run one file:
 
@@ -34,6 +34,11 @@ node --test --test-name-pattern="share" test/files.test.js
 | `test/login-form-origin.test.js` | Form posts: same-origin accepted, cross-site refused. |
 | `test/server.test.js` | Pages, health, routing, error responses. |
 | `test/github-storage.test.js` | Contents API client: reads, conflicts, path allowlist. |
+| `test/chunked-upload.test.js` | Piece-by-piece upload: init and resume, hash checks, conflicts, completion, expiry, limits, cancel, restart, and the upload settings. |
+| `test/url-import.test.js` | URL import: start, poll, cancel, owner-only access, duplicate starts, redirects, timeouts, limits, masked logs. Uses an injected transport, so it does not reach the network. |
+| `test/net-guard.test.js` | Address and host-name checks for URL import, and that the real transport connects to a pinned address without a fresh lookup. |
+| `test/upload-config.test.js` | `loadUploadSettings` bounds, bad values, and what `buildAuth` reports when a setting is wrong. |
+| `test/files-fixture.js` | Shared fixture for the file tests: a fake GitHub, app start, signup, and upload helpers. |
 | `test/helpers.js` | Shared test helpers (sessions). |
 | `test/fake-github.js` | An in-process fake of the GitHub Contents and Releases APIs. Tests use it instead of GitHub. |
 

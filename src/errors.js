@@ -2,11 +2,13 @@
 
 // An error that is safe to show to the client: a status, a stable code, and a plain message.
 class AppError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details) {
     super(message);
     this.name = 'AppError';
     this.status = status;
     this.code = code;
+    // Optional, safe to show: for example the list of missing chunk numbers.
+    if (details !== undefined) this.details = details;
   }
 }
 

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const { Readable } = require('node:stream');
 const { AppError, ConflictError, StorageError } = require('./errors');
-const { loadAuthConfig, loadFileConfig } = require('./config');
+const { loadAuthConfig, loadFileConfig, loadUploadSettings } = require('./config');
 const { GitHubStorage } = require('./github-storage');
 const { GitHubReleases } = require('./github-releases');
 const { RateLimiter } = require('./rate-limit');
@@ -12,7 +12,10 @@ const { signup, login, loadUser, loadAccountRecord, sessionsValidAfter, revokeSe
 const { COOKIE_NAME, createSession, readSession, parseCookies, sessionCookie, clearSessionCookie } = require('./session');
 const { FileService, SHARE_TOKEN_RE } = require('./files');
 const { receiveUpload, removeFile } = require('./upload');
-const { typeFor, CATEGORIES, sanitizeFilename, extensionOf, asciiFallback, encodeFilenameStar, contentMatches, isPreviewable } = require('./file-types');
+const { CATEGORIES, sanitizeFilename, extensionOf, asciiFallback, encodeFilenameStar, isPreviewable } = require('./file-types');
+const { checkStoredFile } = require('./file-checks');
+const { ChunkedUploads, SESSION_ID_RE } = require('./chunked-uploads');
+const { ImportJobs } = require('./import-jobs');
 const pages = require('./pages');
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -73,8 +76,27 @@ function buildFiles(env, authConfig, storage, now, overrides) {
       apiBase: overrides.githubApiBase,
       uploadBase: overrides.githubUploadBase,
     });
-  const service = new FileService({ storage, releases, now, limits: overrides.limits });
-  return { enabled: true, missing: [], service, storageRepo: loaded.config.storageRepo };
+  const settings = loadUploadSettings(env);
+  if (!settings.ok) return { enabled: false, missing: settings.missing, service: null };
+  const limits = { ...settings.limits, ...(overrides.limits || {}) };
+  const tmpDir = overrides.tmpDir || settings.tempDir || undefined;
+  const service = new FileService({ storage, releases, now, limits, tmpDir });
+  const url = overrides.urlImport || {};
+  return {
+    enabled: true,
+    missing: [],
+    service,
+    storageRepo: loaded.config.storageRepo,
+    chunks: new ChunkedUploads({ service, now }),
+    imports: new ImportJobs({
+      service,
+      now,
+      lookup: url.lookup,
+      transport: url.transport,
+      timeouts: url.timeouts,
+      limits: overrides.importLimits,
+    }),
+  };
 }
 
 // Headers on every response. Downloads add their own on top.
@@ -104,8 +126,11 @@ const redirect = (res, location, headers = {}) => send(res, 303, { Location: loc
 
 const isApiPath = (ctx) => ctx.url.pathname.startsWith('/api/');
 
-function fail(ctx, status, code, message, headers = {}) {
-  if (isApiPath(ctx)) return sendJson(ctx.res, status, { success: false, error: { code, message } }, headers);
+function fail(ctx, status, code, message, headers = {}, details) {
+  if (isApiPath(ctx)) {
+    const error = details === undefined ? { code, message } : { code, message, details };
+    return sendJson(ctx.res, status, { success: false, error }, headers);
+  }
   return sendHtml(ctx.res, status, pages.errorPage(status, message), headers);
 }
 
@@ -188,6 +213,12 @@ function requireFileStorage(ctx) {
     throw new AppError(503, 'FILES_NOT_CONFIGURED', `File storage is not configured. Missing: ${missing}.`);
   }
   return ctx.auth.files.service;
+}
+
+// Same checks, but returns the whole file bundle (service, chunked uploads, URL imports).
+function fileServices(ctx) {
+  requireFileStorage(ctx);
+  return ctx.auth.files;
 }
 
 // The session cookie is valid only if it is signed, unexpired, and issued after the last logout.
@@ -407,15 +438,7 @@ async function storeUpload(ctx, service, { uid, linkId, rateKey, perHour }) {
   }
   const tmp = received.file.path;
   try {
-    const name = sanitizeFilename(received.file.filename);
-    if (!name) throw new AppError(400, 'INVALID_FILENAME', 'Use a file name with letters or digits and an extension.');
-    const ext = extensionOf(name);
-    const spec = typeFor(ext);
-    const { size } = await fs.promises.stat(tmp);
-    if (size === 0) throw new AppError(400, 'EMPTY_FILE', 'The file is empty.');
-    if (!(await contentMatches(spec, tmp))) {
-      throw new AppError(415, 'FILE_CONTENT_MISMATCH', 'The file contents do not match its type.');
-    }
+    const { name, ext, spec, size } = await checkStoredFile(received.file.filename, tmp);
     return await service.upload(uid, {
       uploadId: received.fields.uploadId || '',
       tmpPath: tmp,
@@ -505,6 +528,110 @@ async function apiSetSharing(ctx) {
   }
   const { file } = await service.setSharing(user.id, ctx.params.id, body.public);
   ok(ctx, 200, { file });
+}
+
+// ---- chunked uploads. Large files are sent in numbered pieces with a checksum each. See chunked-uploads.js.
+
+const CHUNK_REQUESTS_PER_HOUR = 6000; // per account: far above a 25 MB file in 256 KB pieces, with room for retries
+
+// Refuses when the account has used up its hourly budget for a kind of request. `record` counts this request.
+function hourlyLimit(ctx, key, perHour, message) {
+  if (ctx.auth.limiter.count(key, UPLOAD_WINDOW_MS) >= perHour) {
+    throw new AppError(429, 'RATE_LIMITED', message);
+  }
+  ctx.auth.limiter.record(key);
+}
+
+// Starts a chunked upload, or resumes the unfinished one with the same upload id (200), or reports a finished one.
+async function apiInitUpload(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  // Counts as one upload, the same as a whole-file upload. Resuming an existing session does not count again.
+  const { view, created } = await files.chunks.init(user.id, body, {
+    checkLimit: () => {
+      if (ctx.auth.limiter.count(`upload:${user.id}`, UPLOAD_WINDOW_MS) >= UPLOADS_PER_HOUR) {
+        throw new AppError(429, 'RATE_LIMITED', 'Too many uploads. Try again later.');
+      }
+    },
+    countStart: () => ctx.auth.limiter.record(`upload:${user.id}`),
+  });
+  ok(ctx, created ? 201 : 200, { session: view });
+}
+
+// Sends one piece. The body is the raw bytes of the piece, and X-Chunk-Sha256 is its SHA-256 in hex.
+async function apiPutChunk(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  // Any refusal below happens before the body is read, so the connection is closed afterwards.
+  ctx.res.setHeader('Connection', 'close');
+  const declared = ctx.req.headers['content-length'];
+  const contentLength = declared === undefined ? undefined : Number(declared);
+  if (contentLength !== undefined && !Number.isSafeInteger(contentLength)) {
+    throw new AppError(400, 'INVALID_CONTENT_LENGTH', 'The Content-Length header is not valid.');
+  }
+  hourlyLimit(ctx, `chunk:${user.id}`, CHUNK_REQUESTS_PER_HOUR, 'Too many pieces sent. Try again later.');
+  const result = await withUploadSlot(files.service, () =>
+    files.chunks.putChunk(user.id, ctx.params.sessionId, ctx.params.index, {
+      source: ctx.req,
+      contentLength,
+      sha256: ctx.req.headers['x-chunk-sha256'],
+    }),
+  );
+  ctx.res.removeHeader('Connection');
+  ok(ctx, result.duplicate ? 200 : 201, { index: result.index, duplicate: result.duplicate });
+}
+
+async function apiUploadStatus(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { session: await files.chunks.status(user.id, ctx.params.sessionId) });
+}
+
+// Joins the pieces and stores the file. Missing pieces are listed in details.missing.
+async function apiCompleteUpload(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const result = await withUploadSlot(files.service, () => files.chunks.complete(user.id, ctx.params.sessionId));
+  ok(ctx, result.duplicate ? 200 : 201, { file: result.file });
+}
+
+async function apiCancelUpload(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  ok(ctx, 200, await files.chunks.cancel(user.id, ctx.params.sessionId));
+}
+
+// ---- upload from URL. A job runs in the background: POST starts it (202), GET reports it, DELETE cancels it.
+
+const IMPORT_FINISHED = new Set(['completed', 'failed', 'cancelled']);
+
+async function apiStartImport(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  hourlyLimit(ctx, `import:${user.id}`, files.imports.limits.importsPerHour, 'Too many imports. Try again later.');
+  const { job } = await files.imports.start(user.id, { url: body.url, uploadId: body.uploadId });
+  const view = files.imports.view(user.id, job.uploadId);
+  ok(ctx, IMPORT_FINISHED.has(view.state) ? 200 : 202, { import: view });
+}
+
+async function apiImportStatus(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { import: files.imports.get(user.id, ctx.params.uploadId) });
+}
+
+async function apiCancelImport(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  ok(ctx, 200, { import: files.imports.cancel(user.id, ctx.params.uploadId) });
 }
 
 // ---- public share links. No login. Anyone with the link can read the file it names, and nothing else.
@@ -652,6 +779,8 @@ async function apiDeleteFile(ctx) {
 
 const FILE_ID = '([a-f0-9]{32})';
 const LINK_ID = '([a-f0-9]{32})';
+const SESSION = `(${SESSION_ID_RE.source.slice(1, -1)})`;
+const UUID = '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})';
 const TOKEN = SHARE_TOKEN_RE.source.slice(1, -1);
 
 const ROUTES = [
@@ -669,6 +798,19 @@ const ROUTES = [
   { method: 'GET', path: '/api/me', handler: apiMe },
   { method: 'GET', path: '/api/files', handler: apiListFiles },
   { method: 'POST', path: '/api/files/upload', handler: apiUploadFile },
+  { method: 'POST', path: '/api/uploads/init', handler: apiInitUpload },
+  { method: 'GET', pattern: new RegExp(`^/api/uploads/${SESSION}$`), handler: apiUploadStatus, keys: ['sessionId'] },
+  { method: 'DELETE', pattern: new RegExp(`^/api/uploads/${SESSION}$`), handler: apiCancelUpload, keys: ['sessionId'] },
+  { method: 'POST', pattern: new RegExp(`^/api/uploads/${SESSION}/complete$`), handler: apiCompleteUpload, keys: ['sessionId'] },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/uploads/${SESSION}/chunks/([^/]{1,12})$`),
+    handler: apiPutChunk,
+    keys: ['sessionId', 'index'],
+  },
+  { method: 'POST', path: '/api/files/upload-from-url', handler: apiStartImport },
+  { method: 'GET', pattern: new RegExp(`^/api/files/upload-from-url/${UUID}$`), handler: apiImportStatus, keys: ['uploadId'] },
+  { method: 'DELETE', pattern: new RegExp(`^/api/files/upload-from-url/${UUID}$`), handler: apiCancelImport, keys: ['uploadId'] },
   { method: 'GET', pattern: new RegExp(`^/api/files/${FILE_ID}/download$`), handler: apiDownloadFile },
   { method: 'DELETE', pattern: new RegExp(`^/api/files/${FILE_ID}$`), handler: apiDeleteFile },
   { method: 'GET', pattern: new RegExp(`^/api/files/${FILE_ID}/preview$`), handler: apiPreviewFile },
@@ -691,7 +833,10 @@ function matchRoutes(pathname) {
       if (route.path === pathname) hits.push({ route, params: {} });
     } else {
       const m = route.pattern.exec(pathname);
-      if (m) hits.push({ route, params: { id: m[1] } });
+      if (m) {
+        const keys = route.keys || ['id'];
+        hits.push({ route, params: Object.fromEntries(keys.map((k, i) => [k, m[i + 1]])) });
+      }
     }
   }
   return hits;
@@ -708,7 +853,7 @@ async function handleError(ctx, err) {
       return redirect(ctx.res, `${FORM_PAGES[ctx.url.pathname]}?error=${encodeURIComponent(err.code)}`);
     }
     const headers = err.status === 429 ? { 'Retry-After': '900' } : {};
-    return fail(ctx, err.status, err.code, err.message, headers);
+    return fail(ctx, err.status, err.code, err.message, headers, err.details);
   }
   if (err instanceof ConflictError) {
     console.error(`ConflictError: ${err.message}`);
@@ -773,13 +918,16 @@ function createServer(options = {}) {
   const env = options.env || process.env;
   const auth = buildAuth(env, options);
   const corsOrigins = parseCorsOrigins(env.CORS_ALLOWED_ORIGINS);
-  return http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
     dispatch(req, res, auth, corsOrigins).catch((err) => {
       console.error(`Unhandled error: ${err && err.name}`);
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end();
     });
   });
+  // Tests use this to run the cleanup sweep directly. Nothing in the app reads it.
+  server.fileServices = auth.files;
+  return server;
 }
 
 if (require.main === module) {

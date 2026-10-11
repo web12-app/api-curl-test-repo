@@ -22,6 +22,9 @@ function dashboardClient() {
   var search = document.getElementById('search');
   var category = document.getElementById('category');
   var picker = document.getElementById('picker');
+  var importList = document.getElementById('imports');
+  var urlForm = document.getElementById('url-form');
+  var urlInput = document.getElementById('url-input');
   var drop = document.getElementById('drop');
   var pickBtn = document.getElementById('pick');
   var searchTimer = null;
@@ -223,6 +226,11 @@ function dashboardClient() {
 
   // ---- uploads
 
+  // Files at or above this size are sent in pieces, so an interrupted upload can resume. Smaller files are sent whole.
+  var CHUNK_THRESHOLD = 4 * 1024 * 1024;
+  var PIECE_PARALLEL = 3;
+  var PIECE_TRIES = 3;
+
   function clientCheck(file) {
     if (MAX_BYTES && file.size > MAX_BYTES) {
       return 'Too large. The limit is ' + fmtSize(MAX_BYTES) + '.';
@@ -231,7 +239,8 @@ function dashboardClient() {
     return null;
   }
 
-  function sendUpload(file, uploadId, onProgress) {
+  // Whole-file upload (small files). Abort is wired to the signal so Cancel works while bytes are going up.
+  function sendUpload(file, uploadId, onProgress, signal) {
     return new Promise(function (resolve) {
       var xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/files/upload');
@@ -247,6 +256,10 @@ function dashboardClient() {
       xhr.onerror = function () {
         resolve({ ok: false, status: 0, body: { error: { message: 'Network error. Check your connection and try again.' } } });
       };
+      xhr.onabort = function () {
+        resolve({ ok: false, status: 0, cancelled: true, body: { error: { message: 'Cancelled.' } } });
+      };
+      if (signal) signal.addEventListener('abort', function () { xhr.abort(); });
       var form = new FormData();
       form.append('uploadId', uploadId);
       form.append('file', file, file.name);
@@ -254,22 +267,49 @@ function dashboardClient() {
     });
   }
 
-  // One row per file in the queue. A failed upload keeps its uploadId, so Retry is safe: the server stores the
-  // file once even if an earlier attempt actually succeeded.
-  function queueRow(file) {
-    var bar = el('progress', { max: '1', value: '0', 'aria-label': 'Upload progress for ' + file.name });
+  // One row per item in the upload or import list. Name, size, progress, state, and optional Cancel and Retry.
+  function queueRow(list, title, sizeText) {
+    var bar = el('progress', { max: '1', value: '0', 'aria-label': 'Progress for ' + title });
     var label = el('span', { className: 'queue-state', text: 'Waiting…' });
-    var row = el('li', { className: 'queue-item' }, [el('span', { className: 'queue-name', text: file.name }), bar, label]);
-    queue.appendChild(row);
+    var actions = el('span', { className: 'queue-actions' });
+    var name = el('span', { className: 'queue-name', text: title });
+    if (sizeText) name.appendChild(el('span', { className: 'queue-size', text: ' · ' + sizeText }));
+    var row = el('li', { className: 'queue-item' }, [name, bar, el('span', null, [label, ' ', actions])]);
+    list.appendChild(row);
+    function clearActions() { actions.textContent = ''; }
     return {
-      progress: function (fraction) { bar.value = fraction; label.textContent = Math.round(fraction * 100) + '%'; },
+      progress: function (fraction) {
+        bar.value = Math.max(0, Math.min(1, fraction));
+        label.textContent = Math.round(bar.value * 100) + '%';
+      },
+      indeterminate: function () { bar.removeAttribute('value'); },
       state: function (text, kind) { label.textContent = text; label.className = 'queue-state ' + (kind || ''); },
-      done: function () { bar.value = 1; row.classList.add('done'); setTimeout(function () { row.remove(); }, 4000); },
+      cancelable: function (onCancel) {
+        clearActions();
+        actions.appendChild(el('button', {
+          type: 'button',
+          className: 'linklike',
+          text: 'Cancel',
+          'aria-label': 'Cancel ' + title,
+          onclick: function () { clearActions(); onCancel(); },
+        }));
+      },
+      done: function (text) {
+        clearActions();
+        bar.value = 1;
+        label.textContent = text || 'Done';
+        label.className = 'queue-state done';
+        row.classList.add('done');
+        setTimeout(function () { row.remove(); }, 4000);
+      },
       fail: function (message, retry) {
+        clearActions();
         label.textContent = message;
         label.className = 'queue-state error';
-        if (retry) label.appendChild(el('button', { type: 'button', className: 'linklike', text: 'Retry', onclick: retry }));
+        if (retry) actions.appendChild(el('button', { type: 'button', className: 'linklike', text: 'Retry', onclick: retry }));
       },
+      noCancel: function () { clearActions(); },
+      remove: function () { row.remove(); },
     };
   }
 
@@ -282,17 +322,25 @@ function dashboardClient() {
   }
 
   async function uploadOne(file) {
-    var row = queueRow(file);
+    var row = queueRow(queue, file.name, fmtSize(file.size));
     var problem = clientCheck(file);
     if (problem) {
       row.fail(problem, null);
       notify('error', file.name + ': ' + problem);
       return;
     }
+    if (file.size >= CHUNK_THRESHOLD) {
+      await uploadInPieces(file, row);
+      return;
+    }
     var uploadId = uuid();
+    var controller = new AbortController();
     var attempt = async function () {
+      controller = new AbortController();
       row.state('Uploading…', '');
-      var result = await sendUpload(file, uploadId, row.progress);
+      row.cancelable(function () { controller.abort(); row.fail('Cancelled.', null); });
+      var result = await sendUpload(file, uploadId, row.progress, controller.signal);
+      if (result.cancelled) return;
       if (result.ok) {
         row.done();
         notify('success', file.name + ' uploaded.');
@@ -304,6 +352,294 @@ function dashboardClient() {
     };
     await attempt();
   }
+
+  // ---- uploads in pieces. The upload id is kept in this browser, so choosing the same file again resumes it.
+
+  function resumeKey(file) {
+    return 'upload:' + file.size + ':' + file.lastModified + ':' + file.name;
+  }
+
+  function storedUploadId(key) {
+    try { return window.localStorage.getItem(key); } catch (e) { return null; }
+  }
+
+  function rememberUploadId(key, id) {
+    try {
+      if (id) window.localStorage.setItem(key, id);
+      else window.localStorage.removeItem(key);
+    } catch (e) { /* storage may be off: the upload still works, it just cannot resume after a reload */ }
+  }
+
+  function readSlice(blob) {
+    if (blob.arrayBuffer) return blob.arrayBuffer();
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(reader.result); };
+      reader.onerror = function () { reject(reader.error); };
+      reader.readAsArrayBuffer(blob);
+    });
+  }
+
+  async function sha256Hex(buffer) {
+    if (!window.crypto || !crypto.subtle) {
+      throw new Error('Large uploads need a secure (https) page in this browser.');
+    }
+    var digest = await crypto.subtle.digest('SHA-256', buffer);
+    return Array.prototype.map.call(new Uint8Array(digest), function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+  }
+
+  function pieceLength(session, index) {
+    var last = session.chunkCount - 1;
+    return index === last ? session.size - last * session.chunkBytes : session.chunkBytes;
+  }
+
+  function sleep(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  // Sends one piece. 429 and server errors are retried with a short wait; other refusals are final.
+  async function sendPiece(session, file, index, signal) {
+    var start = index * session.chunkBytes;
+    var buffer = await readSlice(file.slice(start, start + pieceLength(session, index)));
+    var sha = await sha256Hex(buffer);
+    var last = null;
+    for (var attempt = 1; attempt <= PIECE_TRIES; attempt++) {
+      if (signal.aborted) return { cancelled: true };
+      var res = null;
+      try {
+        res = await fetch('/api/uploads/' + session.id + '/chunks/' + index, {
+          method: 'POST',
+          credentials: 'same-origin',
+          signal: signal,
+          headers: { 'X-Requested-With': 'fetch', 'Content-Type': 'application/octet-stream', 'X-Chunk-Sha256': sha },
+          body: buffer,
+        });
+      } catch (e) {
+        if (signal.aborted) return { cancelled: true };
+        last = { ok: false, status: 0, body: { error: { message: 'Network error. Check your connection and try again.' } } };
+      }
+      if (res) {
+        var body = {};
+        try { body = await res.json(); } catch (e) { body = {}; }
+        last = { ok: res.ok, status: res.status, body: body };
+        if (res.ok) return last;
+        if (res.status !== 429 && res.status < 500) return last;
+      }
+      if (attempt < PIECE_TRIES) await sleep(500 * attempt);
+    }
+    return last;
+  }
+
+  // The whole piece-by-piece upload. Returns when the file is stored, the user cancels, or it fails for good.
+  async function uploadInPieces(file, row) {
+    var key = resumeKey(file);
+    var uploadId = storedUploadId(key) || uuid();
+    var controller = new AbortController();
+    var cancelled = false;
+    var sessionId = null;
+
+    async function initSession() {
+      return api('/api/uploads/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: file.name, size: file.size, uploadId: uploadId }),
+      });
+    }
+
+    function cancelNow() {
+      cancelled = true;
+      controller.abort();
+      row.state('Cancelling…', '');
+      rememberUploadId(key, null);
+      var id = sessionId;
+      if (id) api('/api/uploads/' + id, { method: 'DELETE' });
+      row.fail('Cancelled.', null);
+    }
+
+    async function run() {
+      row.state('Starting…', '');
+      row.cancelable(cancelNow);
+      var init = await initSession();
+      if (!init.ok && (init.body.error && (init.body.error.code === 'UPLOAD_ID_USED' || init.body.error.code === 'UPLOAD_MISMATCH'))) {
+        // The stored id belongs to an upload that cannot resume. Start over with a new id.
+        uploadId = uuid();
+        init = await initSession();
+      }
+      if (!init.ok) return failed(messageOf(init), init.status === 401);
+      var session = init.body.data.session;
+      if (cancelled) {
+        // Cancel was clicked while the session was being opened. Remove it, unless it already finished.
+        if (session.status !== 'completed') api('/api/uploads/' + session.id, { method: 'DELETE' });
+        return;
+      }
+      if (session.status === 'completed') return finished(session.file);
+      sessionId = session.id;
+      rememberUploadId(key, uploadId);
+
+      var done = {};
+      session.received.forEach(function (i) { done[i] = true; });
+      var sentBytes = function () {
+        var total = 0;
+        Object.keys(done).forEach(function (i) { total += pieceLength(session, Number(i)); });
+        return total;
+      };
+      row.progress(sentBytes() / file.size);
+      row.state('Sending…', '');
+
+      var queueList = session.missing.slice();
+      var failure = null;
+      async function worker() {
+        while (queueList.length && !failure && !cancelled) {
+          var index = queueList.shift();
+          var result = await sendPiece(session, file, index, controller.signal);
+          if (cancelled || (result && result.cancelled)) return;
+          if (!result || !result.ok) {
+            failure = result ? messageOf(result) : 'The piece could not be sent.';
+            return;
+          }
+          done[index] = true;
+          row.progress(sentBytes() / file.size);
+        }
+      }
+      var workers = [];
+      for (var w = 0; w < PIECE_PARALLEL; w++) workers.push(worker());
+      await Promise.all(workers);
+      if (cancelled) return;
+      if (failure) return failed(failure, false);
+
+      // From here the server may already be storing the file, so Cancel is no longer offered.
+      row.noCancel();
+      row.state('Saving…', '');
+      var complete = await api('/api/uploads/' + session.id + '/complete', { method: 'POST' });
+      if (cancelled) return;
+      if (!complete.ok && complete.body.error && complete.body.error.code === 'CHUNKS_MISSING') {
+        return failed('Some pieces were lost. Choose the file again to resume.', false);
+      }
+      if (!complete.ok) return failed(messageOf(complete), complete.status === 401);
+      return finished(complete.body.data.file);
+    }
+
+    function finished(stored) {
+      rememberUploadId(key, null);
+      row.done('Uploaded');
+      notify('success', file.name + ' uploaded.');
+      return stored;
+    }
+
+    function failed(message, needsLogin) {
+      row.fail(message, function () { uploadInPieces(file, row); });
+      notify('error', file.name + ': ' + message, needsLogin);
+    }
+
+    try {
+      await run();
+    } catch (e) {
+      if (!cancelled) failed('Upload failed. Choose the file again to resume.', false);
+    }
+  }
+
+  // ---- upload from URL. The server downloads the file. The link is kept only until the import starts.
+
+  function importRow(host) {
+    return queueRow(importList, 'Import from ' + host, '');
+  }
+
+  // Polls one import until it finishes. Returns when it reaches a final state.
+  function pollImport(uploadId, row, host, onCancelState) {
+    var timer = null;
+    var finishedState = false;
+    function stop() {
+      finishedState = true;
+      if (timer) clearTimeout(timer);
+    }
+    async function tick() {
+      if (finishedState) return;
+      var res = await api('/api/files/upload-from-url/' + uploadId);
+      if (finishedState) return;
+      if (!res.ok && res.status === 0) {
+        // Network blip: the import itself is unaffected, so try again shortly.
+        timer = setTimeout(tick, 2000);
+        return;
+      }
+      if (!res.ok) {
+        stop();
+        row.fail(messageOf(res), null);
+        notify('error', 'Import from ' + host + ' failed: ' + messageOf(res), res.status === 401);
+        return;
+      }
+      var job = res.body.data.import;
+      if (job.state === 'queued') row.state('Waiting…', '');
+      else if (job.state === 'downloading') {
+        row.indeterminate();
+        row.state(job.downloaded ? 'Downloading… ' + fmtSize(job.downloaded) : 'Downloading…', '');
+      } else if (job.state === 'checking' || job.state === 'storing') {
+        row.indeterminate();
+        row.state('Saving…', '');
+      }
+      if (job.state === 'completed') {
+        stop();
+        row.done('Imported ' + (job.name || 'file'));
+        notify('success', (job.name || 'File') + ' imported.');
+        loadFiles();
+        return;
+      }
+      if (job.state === 'failed') {
+        stop();
+        row.fail(job.error ? job.error.message : 'The import failed.', onCancelState.retry);
+        notify('error', 'Import from ' + host + ' failed: ' + (job.error ? job.error.message : 'unknown error'));
+        return;
+      }
+      if (job.state === 'cancelled') {
+        stop();
+        row.fail('Cancelled.', onCancelState.retry);
+        return;
+      }
+      timer = setTimeout(tick, 1000);
+    }
+    function cancelImport() {
+      // Cancel is allowed only before the file is being saved. When the server refuses, the row keeps polling.
+      api('/api/files/upload-from-url/' + uploadId, { method: 'DELETE' }).then(function (res) {
+        if (finishedState) return;
+        if (!res.ok) {
+          notify('error', 'This import can no longer be cancelled: ' + messageOf(res));
+          row.cancelable(cancelImport);
+          return;
+        }
+        stop();
+        row.fail('Cancelled.', onCancelState.retry);
+      });
+    }
+    row.cancelable(cancelImport);
+    tick();
+  }
+
+  // Starts an import. A retry sends the same upload id, so a file that was already stored is not stored twice.
+  function startImport(url) {
+    var host = '';
+    try { host = new URL(url).hostname; } catch (e) { host = 'link'; }
+    var uploadId = uuid();
+    var row = importRow(host);
+    var callbacks = { retry: null };
+    callbacks.retry = function () { begin(); };
+
+    async function begin() {
+      row.state('Starting…', '');
+      var res = await api('/api/files/upload-from-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: url, uploadId: uploadId }),
+      });
+      if (!res.ok) {
+        row.fail(messageOf(res), callbacks.retry);
+        notify('error', 'Import failed: ' + messageOf(res), res.status === 401);
+        return;
+      }
+      pollImport(uploadId, row, host, callbacks);
+    }
+    begin();
+  }
+
+  // ---- files, links, and wiring
 
   async function removeFile(file) {
     if (!window.confirm('Delete "' + file.name + '"? This cannot be undone.')) return;
@@ -394,6 +730,17 @@ function dashboardClient() {
   // ---- wiring
 
   pickBtn.addEventListener('click', function () { picker.click(); });
+  urlForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var url = urlInput.value.trim();
+    if (!url) {
+      notify('error', 'Enter a direct file URL first.');
+      return;
+    }
+    // Cleared at once, so the link is not left on screen. It is kept in memory for this import only.
+    urlInput.value = '';
+    startImport(url);
+  });
   picker.addEventListener('change', function () {
     uploadFiles(picker.files);
     picker.value = '';

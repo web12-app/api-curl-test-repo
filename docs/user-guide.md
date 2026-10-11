@@ -27,6 +27,16 @@ Shows how many files you have, for example `5 of 200 files`. There is no storage
 - Known types (listed in [Which files can I upload](#which-files-can-i-upload)) are checked: the file's first bytes must match its extension. A renamed file is refused with *The file contents do not match its type*.
 - Unknown types are stored and can only be **downloaded**. They never open in the browser.
 - A failed upload stays in the queue with a **Retry** link. Retrying is safe: the server stores a file once even if the first attempt partly worked.
+- Files of **4 MB or more** are sent in pieces, and the queue shows the percentage. If the connection drops, **Retry** continues from the pieces that arrived. If you reload the page, choose the same file again to resume it. The browser remembers the upload for that file, so only the missing pieces are sent. A cancelled upload is removed.
+- **Cancel** stops an upload while it is being sent. Once the server starts saving the file, Cancel is no longer offered, and the file is stored.
+
+### 2a. Upload from URL
+
+- Paste a direct link to a file into **Upload from URL**, then press **Import**. The link must start with `https://`, point to a public host, and lead to a file of at most 25 MB.
+- The server downloads the file in the background. The queue shows the state: waiting, downloading, saving, imported, or failed.
+- **Cancel** works while the import is waiting or downloading. A failed import keeps its **Retry** link.
+- The link is cleared from the box when you press Import, and the server does not keep it after the import finishes. Only the host name is shown.
+- Links that redirect are followed, up to three times, and each new address must also be public. Links to private or local addresses, and links with a user name or password, are refused.
 
 ### 3. Files
 

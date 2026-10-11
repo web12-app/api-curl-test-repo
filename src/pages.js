@@ -83,6 +83,12 @@ const DASHBOARD_CSS = `
       .queue-item progress { width: 100%; }
       .queue-item.done { color: #1a7f37; }
       .queue-state.error { color: #cf222e; }
+      .queue-size { color: #57606a; font-weight: normal; }
+      .queue-actions button { margin-left: .4rem; }
+      .url-form { margin-top: .9rem; }
+      .url-form label { display: block; font-weight: 600; margin-bottom: .25rem; }
+      .url-row { display: flex; flex-wrap: wrap; gap: .4rem; }
+      .url-row input { flex: 1 1 16rem; min-width: 0; padding: .35rem .5rem; border: 1px solid #d0d7de; border-radius: 6px; font: inherit; }
       @media (max-width: 640px) {
         table.files thead { display: none; }
         table.files, table.files tbody, table.files tr, table.files td { display: block; width: 100%; box-sizing: border-box; }
@@ -179,9 +185,18 @@ function dashboardPage(user, { filesEnabled = false, maxBytes = 0, linkMaxFiles 
          <p>Drag files here, or</p>
          <button type="button" id="pick">Choose files</button>
          <input type="file" id="picker" multiple hidden>
-         <p class="hint">Any file type, up to ${mb} MB per file. Images, video, audio, PDF, and text can be previewed. Other types download as files.</p>
+         <p class="hint">Any file type, up to ${mb} MB per file. Images, video, audio, PDF, and text can be previewed. Other types download as files. Large files are sent in pieces: if the connection drops, choose the same file again to resume it.</p>
        </div>
+       <form id="url-form" class="url-form">
+         <label for="url-input">Upload from URL</label>
+         <div class="url-row">
+           <input type="url" id="url-input" name="url" placeholder="Enter direct file URL" aria-label="Enter direct file URL" autocomplete="off" maxlength="2048" required>
+           <button type="submit" id="url-submit">Import</button>
+         </div>
+         <p class="hint">Paste a public https:// link to a file, up to ${mb} MB. The server downloads it; the link is not kept after the import finishes.</p>
+       </form>
        <ul id="queue" class="queue" aria-label="Uploads"></ul>
+       <ul id="imports" class="queue" aria-label="Imports from URL"></ul>
      </section>
 
      <section aria-labelledby="files-title">

@@ -97,6 +97,38 @@ curl -b cookies.txt -H 'X-Requested-With: fetch' -H 'Origin: http://localhost:30
   http://localhost:3000/api/files/upload
 ```
 
+### Piece-by-piece upload (large files)
+
+The browser sends files of 4 MB or more in pieces, so an interrupted upload can resume. The same flow works for any client. Each piece is checked with its own SHA-256, and the whole file is checked again when it is joined. The same 25 MB cap applies.
+
+| Method and path | Body | Result |
+| --- | --- | --- |
+| `POST /api/uploads/init` | JSON: `{"name", "size", "uploadId"}`. `uploadId` is a UUID you create per file. | `201` new session, or `200` when resuming the same unfinished upload, or when it already finished. `data.session` has `id`, `chunkBytes`, `chunkCount`, `received` (piece numbers), `missing`, and `status`. |
+| `POST /api/uploads/<sessionId>/chunks/<n>` | Raw bytes of piece `n`. `Content-Type: application/octet-stream`. Header `X-Chunk-Sha256`: the piece's SHA-256 in hex. | `201` stored, `200` if the same piece was already stored. A refusal closes the connection. |
+| `GET /api/uploads/<sessionId>` | none | `200`, `data.session` |
+| `POST /api/uploads/<sessionId>/complete` | none | `201` stored (`data.file`), `200` if already stored. `400 CHUNKS_MISSING` lists the missing numbers in `error.details.missing`. |
+| `DELETE /api/uploads/<sessionId>` | none | `200`. Removes the session and its pieces. |
+
+Errors on these routes: `400 INVALID_UPLOAD_ID`, `400 INVALID_SIZE`, `400 INVALID_CHUNK_SIZE`, `400 CHUNK_HASH_REQUIRED`, `400 CHUNK_SIZE_MISMATCH`, `400 CHUNK_CORRUPT` (the bytes do not match `X-Chunk-Sha256`), `400 INVALID_CHUNK_INDEX`, `400 TOO_MANY_CHUNKS`, `400 CHUNKS_MISSING`, `400 EMPTY_FILE`, `400 INVALID_FILENAME`, `409 CHUNK_CONFLICT` (different bytes for a piece already stored), `409 UPLOAD_ID_USED`, `409 UPLOAD_MISMATCH` (the uploadId was used for a different name or size), `409 UPLOAD_IN_PROGRESS`, `409 UPLOAD_NOT_OPEN`, `410 UPLOAD_EXPIRED`, `413 CHUNK_TOO_LARGE`, `413 FILE_TOO_LARGE`, `415 FILE_CONTENT_MISMATCH`, `429 RATE_LIMITED`, `429 TOO_MANY_UPLOADS`, `503 BUSY`.
+
+Retrying a piece is safe. Sending the same piece again with the same bytes returns `200`.
+
+### Upload from URL
+
+The server downloads a file from a public `https://` link. It works in the background, and the client polls it. Only the owner of an import can see or cancel it. The link itself is kept only in memory for the life of the import, and only its host is returned.
+
+| Method and path | Body | Result |
+| --- | --- | --- |
+| `POST /api/files/upload-from-url` | JSON: `{"url", "uploadId"}`. `uploadId` is a UUID you create per import. | `202` while the import is running, `200` when it has already finished. `data.import` is the job view. A repeat with the same `uploadId` returns the running job and starts no second download. |
+| `GET /api/files/upload-from-url/<uploadId>` | none | `200`, `data.import` |
+| `DELETE /api/files/upload-from-url/<uploadId>` | none | `200`, `data.import`. Cancels a job in `queued` or `downloading`. |
+
+The job view has `uploadId`, `host`, `state`, `name`, `size`, `downloaded` (bytes so far), `error` (`code` and `message`), `file` (once stored), and `updatedAt`. States: `queued`, `downloading`, `checking`, `storing`, `completed`, `failed`, `cancelled`.
+
+Errors: `400 IMPORT_INVALID_URL` (not https, has a user name or password, is too long, or is not a valid link), `400 IMPORT_BLOCKED_DESTINATION` (the host name or its address is private, local, or otherwise not public), `404 NOT_FOUND` (unknown, or not yours), `409 IMPORT_NOT_CANCELLABLE` (being saved), `409 IMPORT_ALREADY_DONE`, `429 IMPORT_BUSY` or `429 RATE_LIMITED` (too many running or too many starts), `409 IMPORT_CANCELLED`, `502 IMPORT_DNS_FAILED`, `502 IMPORT_UPSTREAM_ERROR`, `502 IMPORT_UPSTREAM_STATUS` (the host answered with an error status), `502 IMPORT_UNSUPPORTED_ENCODING`, `502 IMPORT_INTERRUPTED` (the download stopped early), `502 IMPORT_TOO_MANY_REDIRECTS`, `502 IMPORT_BAD_REDIRECT`, `504 IMPORT_TIMEOUT`, `413 FILE_TOO_LARGE`, `415 FILE_CONTENT_MISMATCH`. A failed import shows its error in `error`, not as an HTTP error on the GET.
+
+Both routes require a session and `X-Requested-With: fetch`, and the Origin check applies, the same as the other owner routes.
+
 ### Download
 
 `GET /api/files/<id>/download`
@@ -191,7 +223,9 @@ The stored file records `linkId` only. The uploader's address is never stored.
 | Code | Meaning in this API |
 | --- | --- |
 | 200 | Success, or a repeated upload |
-| 201 | Created (account, file, upload link) |
+| 201 | Created (account, file, upload link, piece upload session) |
+| 202 | Accepted: a URL import is running |
+| 410 | Gone: an unfinished piece upload has expired |
 | 400 | The request is malformed or fails validation |
 | 401 | No valid session |
 | 403 | Missing `X-Requested-With`, or a cross-site request |

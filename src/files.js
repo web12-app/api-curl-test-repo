@@ -191,6 +191,25 @@ class FileService {
     };
   }
 
+  // Looks up an earlier upload by its client id. Returns { status: 'ready', file } or { status: 'pending' } or null.
+  async findUpload(uid, uploadId) {
+    const stored = await this.storage.readJson(manifestPath(uid));
+    const entry = stored ? stored.data.files.find((f) => f.uploadId === uploadId) : null;
+    if (!entry) return null;
+    if (entry.status === 'ready') return { status: 'ready', file: publicFile(entry) };
+    if (entry.status === 'pending') return { status: 'pending' };
+    return null;
+  }
+
+  // Fails before any upload work starts when the account is already at its file limit.
+  async assertRoom(uid) {
+    const stored = await this.storage.readJson(manifestPath(uid));
+    const used = usage(stored ? stored.data.files : []);
+    if (used.count >= this.limits.maxFiles) {
+      throw new AppError(507, 'FILE_LIMIT_REACHED', `You can keep up to ${this.limits.maxFiles} files.`);
+    }
+  }
+
   // Stores one file. `input` holds the validated name and type and the path of the temp file on disk.
   // Returns { file, duplicate }. A repeat of an upload that already finished returns it with duplicate: true.
   async upload(uid, { uploadId, tmpPath, size, name, spec, ext, linkId = null }) {
