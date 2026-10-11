@@ -255,18 +255,9 @@ test('delete removes the asset, its release and tag, and the record', async () =
   });
 });
 
-test('invalid file types and mismatched contents are rejected, and nothing is stored', async () => {
+test('mismatched contents are rejected, and nothing is stored', async () => {
   await withApp({}, async (app) => {
     const user = await signup(app);
-    for (const [name, bytes] of [
-      ['page.html', '<script>alert(1)</script>'],
-      ['vector.svg', '<svg></svg>'],
-      ['program.exe', 'MZ'],
-    ]) {
-      const { res, body } = await upload(app, user.cookie, name, bytes);
-      assert.equal(res.status, 415, name);
-      assert.equal(body.error.code, 'UNSUPPORTED_FILE_TYPE', name);
-    }
     // A PNG name with text inside is refused on content, not on name.
     const fakePng = await upload(app, user.cookie, 'fake.png', 'definitely not a png', { type: 'image/png' });
     assert.equal(fakePng.res.status, 415);
@@ -519,17 +510,17 @@ test('uploads are refused when the storage repository is not private', async () 
   });
 });
 
-test('uploads beyond the per-user quota are refused', async () => {
-  await withApp({ limits: { userQuotaBytes: 1500, maxFileBytes: 1000 } }, async (app) => {
+test('there is no total storage limit: many files past the old 200 MB quota are accepted', async () => {
+  await withApp({ limits: { maxFileBytes: 1000 } }, async (app) => {
     const user = await signup(app);
-    const first = await upload(app, user.cookie, 'one.txt', 'x'.repeat(1000));
-    assert.equal(first.res.status, 201);
-    const second = await upload(app, user.cookie, 'two.txt', 'x'.repeat(600));
-    assert.equal(second.res.status, 507);
-    assert.equal(second.body.error.code, 'QUOTA_EXCEEDED');
+    for (const name of ['a.txt', 'b.txt', 'c.txt']) {
+      const r = await upload(app, user.cookie, name, 'x'.repeat(1000));
+      assert.equal(r.res.status, 201, name);
+    }
     const { data } = await listFiles(app, user.cookie);
-    assert.equal(data.quota.usedBytes, 1000);
-    assert.equal(data.quota.limitBytes, 1500);
+    assert.equal(data.quota.usedBytes, 3000);
+    assert.equal(data.quota.limitBytes, undefined, 'no limit is reported');
+    assert.equal(data.files.length, 3);
   });
 });
 
@@ -540,7 +531,8 @@ test('search and category filters narrow the list', async () => {
     await upload(app, user.cookie, 'holiday.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), { type: 'image/png' });
     assert.equal((await listFiles(app, user.cookie, '?category=image')).data.files.map((f) => f.name).join(), 'holiday.png');
     assert.equal((await listFiles(app, user.cookie, '?q=NOTES')).data.files.map((f) => f.name).join(), 'meeting-notes.txt');
-    assert.equal((await listFiles(app, user.cookie, '?category=video')).status, 400);
+    assert.equal((await listFiles(app, user.cookie, '?category=video')).status, 200);
+    assert.equal((await listFiles(app, user.cookie, '?category=bogus')).status, 400);
   });
 });
 
@@ -696,5 +688,508 @@ test('uploads are capped in flight, and an abandoned upload frees its slot', asy
     }
     assert.equal(last.res.status, 201, `status ${last.res.status}`);
     assert.equal(storedAssets().length, 1, 'the abandoned upload stored nothing');
+  });
+});
+
+// ---- preview
+
+test('preview: an owner sees a previewable file inline with a sandboxed policy; other types are refused', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('pixels')]);
+    const { body } = await upload(app, user.cookie, 'pic.png', png, { type: 'image/png' });
+    const res = await authed(app, user.cookie, `/api/files/${body.data.file.id}/preview`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), png);
+    assert.equal(res.headers.get('content-type'), 'image/png');
+    assert.match(res.headers.get('content-disposition'), /^inline;/);
+    assert.equal(res.headers.get('x-frame-options'), 'SAMEORIGIN', 'the dashboard can frame it, other sites cannot');
+    assert.match(res.headers.get('content-security-policy'), /sandbox/);
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+
+    const zip = await upload(app, user.cookie, 'bundle.zip', Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]), { type: 'application/zip' });
+    const refused = await authed(app, user.cookie, `/api/files/${zip.body.data.file.id}/preview`);
+    assert.equal(refused.status, 415);
+    assert.equal((await refused.json()).error.code, 'PREVIEW_NOT_AVAILABLE');
+  });
+});
+
+// ---- sharing
+
+const putSharing = (app, cookie, id, makePublic) =>
+  authed(app, cookie, `/api/files/${id}/sharing`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ public: makePublic }),
+  });
+
+test('sharing: private by default; a link works without login; turning it off ends the link', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const bytes = 'shared bytes\n';
+    const { body } = await upload(app, user.cookie, 'report.txt', bytes);
+    const id = body.data.file.id;
+    let { data } = await listFiles(app, user.cookie);
+    assert.equal(data.files[0].visibility, 'private');
+    assert.equal(data.files[0].sharePath, null);
+
+    const on = await putSharing(app, user.cookie, id, true);
+    assert.equal(on.status, 200);
+    const sharePath = (await on.json()).data.file.sharePath;
+    assert.match(sharePath, /^\/s\/[A-Za-z0-9_-]{43}$/);
+    const token = sharePath.slice(3);
+
+    // No cookie and no Origin: the link stands on its own.
+    const dl = await fetch(`${app.base}/s/${token}/download`);
+    assert.equal(dl.status, 200);
+    assert.equal(await dl.text(), bytes);
+    assert.match(dl.headers.get('content-disposition'), /^attachment;/);
+
+    const page = await fetch(`${app.base}/s/${token}`);
+    assert.equal(page.status, 200);
+    const html = await page.text();
+    assert.match(html, /report\.txt/);
+    assert.doesNotMatch(html, /api\.github|upload-|releases|assets|ghp_/i, 'no storage details on the public page');
+
+    const off = await putSharing(app, user.cookie, id, false);
+    assert.equal(off.status, 200);
+    assert.equal((await fetch(`${app.base}/s/${token}/download`)).status, 404);
+    assert.equal((await fetch(`${app.base}/s/${token}`)).status, 404);
+    ({ data } = await listFiles(app, user.cookie));
+    assert.equal(data.files[0].visibility, 'private');
+  });
+});
+
+test('sharing: turning it on again makes a new link, and the old link stays dead', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'a.txt', 'hello');
+    const id = body.data.file.id;
+    const first = (await (await putSharing(app, user.cookie, id, true)).json()).data.file.sharePath.slice(3);
+    // Turning it on while already on keeps the same link.
+    const again = (await (await putSharing(app, user.cookie, id, true)).json()).data.file.sharePath.slice(3);
+    assert.equal(again, first);
+    await putSharing(app, user.cookie, id, false);
+    const second = (await (await putSharing(app, user.cookie, id, true)).json()).data.file.sharePath.slice(3);
+    assert.notEqual(second, first);
+    assert.equal((await fetch(`${app.base}/s/${first}/download`)).status, 404, 'the old link is dead');
+    assert.equal(await (await fetch(`${app.base}/s/${second}/download`)).text(), 'hello');
+  });
+});
+
+test('sharing: deleting a shared file ends its link', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'gone.txt', 'soon gone');
+    const id = body.data.file.id;
+    const token = (await (await putSharing(app, user.cookie, id, true)).json()).data.file.sharePath.slice(3);
+    assert.equal(await (await fetch(`${app.base}/s/${token}/download`)).text(), 'soon gone');
+    const del = await authed(app, user.cookie, `/api/files/${id}`, { method: 'DELETE' });
+    assert.equal(del.status, 200);
+    assert.equal((await fetch(`${app.base}/s/${token}/download`)).status, 404);
+  });
+});
+
+test('sharing: a share link keeps working after a process restart', async () => {
+  const first = await startApp({});
+  const user = await signup(first);
+  const { body } = await upload(first, user.cookie, 'keep.txt', 'kept across restart');
+  const token = (await (await putSharing(first, user.cookie, body.data.file.id, true)).json()).data.file.sharePath.slice(3);
+  await first.close();
+
+  const second = await startApp({});
+  try {
+    const res = await fetch(`${second.base}/s/${token}/download`);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), 'kept across restart');
+  } finally {
+    await second.close();
+  }
+});
+
+test('sharing and preview are owner-only: another user gets 404 and cannot change the file', async () => {
+  await withApp({}, async (app) => {
+    const alice = await signup(app);
+    const bob = await signup(app);
+    const { body } = await upload(app, alice.cookie, 'alice.txt', 'alice only');
+    const id = body.data.file.id;
+    assert.equal((await putSharing(app, bob.cookie, id, true)).status, 404);
+    assert.equal((await authed(app, bob.cookie, `/api/files/${id}/preview`)).status, 404);
+    const { data } = await listFiles(app, alice.cookie);
+    assert.equal(data.files[0].visibility, 'private', 'bob could not make it public');
+  });
+});
+
+test('sharing: needs a session and the X-Requested-With header', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'a.txt', 'x');
+    const id = body.data.file.id;
+    const noSession = await fetch(`${app.base}/api/files/${id}/sharing`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: app.base },
+      body: JSON.stringify({ public: true }),
+    });
+    assert.equal(noSession.status, 401);
+    const noHeader = await fetch(`${app.base}/api/files/${id}/sharing`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: app.base, Cookie: user.cookie },
+      body: JSON.stringify({ public: true }),
+    });
+    assert.equal(noHeader.status, 403);
+    assert.equal((await noHeader.json()).error.code, 'CSRF_HEADER_REQUIRED');
+  });
+});
+
+test('sharing: a bad body is refused, and unknown or malformed links are 404', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'a.txt', 'x');
+    const id = body.data.file.id;
+    const bad = await authed(app, user.cookie, `/api/files/${id}/sharing`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public: 'yes' }),
+    });
+    assert.equal(bad.status, 400);
+    assert.equal((await bad.json()).error.code, 'INVALID_BODY');
+
+    // A never-shared file has no link, and a made-up token matches nothing.
+    assert.equal((await fetch(`${app.base}/s/${'A'.repeat(43)}/download`)).status, 404);
+    assert.equal((await fetch(`${app.base}/s/short/download`)).status, 404);
+    assert.equal((await fetch(`${app.base}/s/${'A'.repeat(43)}`)).status, 404);
+  });
+});
+
+test('shared preview is inline and sandboxed, and only for previewable types', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'note.txt', 'preview me');
+    const token = (await (await putSharing(app, user.cookie, body.data.file.id, true)).json()).data.file.sharePath.slice(3);
+    const res = await fetch(`${app.base}/s/${token}/preview`);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), 'preview me');
+    assert.match(res.headers.get('content-disposition'), /^inline;/);
+    assert.match(res.headers.get('content-security-policy'), /sandbox/);
+  });
+});
+
+
+// ---- any file type, video, and anonymous upload links (Task 12)
+
+const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypisom'), Buffer.from('rest of the movie')]);
+const WEBM = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from('webm body')]);
+
+test('any type is accepted: unknown and active types are stored as octet-stream and only downloaded as attachments', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    for (const [name, bytes] of [
+      ['page.html', '<script>alert(1)</script>'],
+      ['vector.svg', '<svg onload="alert(1)"></svg>'],
+      ['program.exe', 'MZ\u0000\u0000'],
+    ]) {
+      const { res, body } = await upload(app, user.cookie, name, bytes, { type: 'text/html' });
+      assert.equal(res.status, 201, name);
+      assert.equal(body.data.file.category, 'other', name);
+      const id = body.data.file.id;
+
+      const dl = await authed(app, user.cookie, `/api/files/${id}/download`);
+      assert.equal(dl.status, 200, name);
+      assert.equal(dl.headers.get('content-type'), 'application/octet-stream', name);
+      assert.match(dl.headers.get('content-disposition'), /^attachment;/, name);
+      assert.equal(dl.headers.get('x-content-type-options'), 'nosniff', name);
+
+      const pv = await authed(app, user.cookie, `/api/files/${id}/preview`);
+      assert.equal(pv.status, 415, name);
+      assert.equal((await pv.json()).error.code, 'PREVIEW_NOT_AVAILABLE', name);
+    }
+    const { data } = await listFiles(app, user.cookie);
+    assert.equal(data.files.every((f) => f.previewable === false), true, 'none of these can be previewed');
+  });
+});
+
+test('video and audio: the signature must match, and a valid file is accepted and listed as video', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const ok1 = await upload(app, user.cookie, 'Holiday.MP4', MP4, { type: 'video/mp4' });
+    assert.equal(ok1.res.status, 201);
+    assert.equal(ok1.body.data.file.category, 'video');
+    assert.equal(ok1.body.data.file.type, 'video/mp4');
+    const ok2 = await upload(app, user.cookie, 'clip.webm', WEBM, { type: 'video/webm' });
+    assert.equal(ok2.res.status, 201);
+    const fake = await upload(app, user.cookie, 'fake.mp4', 'this is not a video', { type: 'video/mp4' });
+    assert.equal(fake.res.status, 415);
+    assert.equal(fake.body.error.code, 'FILE_CONTENT_MISMATCH');
+    const { data } = await listFiles(app, user.cookie, '?category=video');
+    assert.deepEqual(data.files.map((f) => f.name).sort(), ['Holiday.MP4', 'clip.webm'].sort());
+  });
+});
+
+test('a video preview is inline with its own type and the sandbox policy', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'movie.mp4', MP4, { type: 'video/mp4' });
+    const res = await authed(app, user.cookie, `/api/files/${body.data.file.id}/preview`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'video/mp4');
+    assert.match(res.headers.get('content-disposition'), /^inline;/);
+    assert.match(res.headers.get('content-security-policy'), /sandbox/);
+    assert.equal(res.headers.get('x-frame-options'), 'SAMEORIGIN');
+  });
+});
+
+const createLink = (app, cookie, label = '') =>
+  authed(app, cookie, '/api/upload-links', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label }),
+  });
+
+// Anonymous upload through a link: no cookie, no CSRF header. Only the path (with the token) is needed.
+async function uploadViaLink(app, uploadPath, name, bytes, { type = 'text/plain', origin = null } = {}) {
+  const form = new FormData();
+  form.append('uploadId', crypto.randomUUID());
+  form.append('file', new Blob([bytes], { type }), name);
+  const headers = origin ? { Origin: origin } : {};
+  const res = await fetch(`${app.base}${uploadPath}/upload`, { method: 'POST', headers, body: form, redirect: 'manual' });
+  return { res, text: await res.text() };
+}
+
+test('upload link: the owner creates a link, anyone uploads with no login, and the owner sees and manages the upload', async () => {
+  await withApp({}, async (app) => {
+    const owner = await signup(app);
+    const made = await createLink(app, owner.cookie, 'Photos from the trip');
+    assert.equal(made.status, 201);
+    const { link } = (await made.json()).data;
+    assert.match(link.uploadPath, /^\/u\/[A-Za-z0-9_-]{43}$/);
+    assert.equal(link.label, 'Photos from the trip');
+
+    const page = await fetch(`${app.base}${link.uploadPath}`);
+    assert.equal(page.status, 200);
+    const html = await page.text();
+    assert.match(html, /enctype="multipart\/form-data"/);
+    assert.match(html, /name="uploadId"/);
+    assert.doesNotMatch(html, /<script/i, 'the form needs no script');
+    assert.match(page.headers.get('content-security-policy'), /form-action 'self'/);
+
+    // A cross-site origin still works: the token is the credential, and the route has no cookie to abuse.
+    const sent = await uploadViaLink(app, link.uploadPath, 'trip.txt', 'hello from a guest', { origin: 'https://elsewhere.example' });
+    assert.equal(sent.res.status, 200, sent.text);
+    assert.match(sent.text, /was stored/);
+
+    const { data } = await listFiles(app, owner.cookie);
+    assert.equal(data.files.length, 1);
+    assert.equal(data.files[0].viaLink, true);
+    assert.equal(data.files[0].name, 'trip.txt');
+
+    const links = await (await authed(app, owner.cookie, '/api/upload-links')).json();
+    assert.equal(links.data.links[0].uploads, 1);
+    assert.equal(links.data.links[0].active, true);
+
+    // The manifest keeps the link id only. It never stores the uploader's address.
+    const stored = fake.contents.get(`${DATA_REPO}:uploads/${owner.userId}/manifest.json`).buf.toString();
+    assert.match(stored, /"linkId": ?"[a-f0-9]{32}"/);
+    assert.doesNotMatch(stored, /127\.0\.0\.1|::1|"ip"/);
+    // The stored bytes are the guest's bytes.
+    const dl = await authed(app, owner.cookie, `/api/files/${data.files[0].id}/download`);
+    assert.equal(await dl.text(), 'hello from a guest');
+  });
+});
+
+test('upload link: revoke stops new uploads at once and keeps the files already uploaded', async () => {
+  await withApp({}, async (app) => {
+    const owner = await signup(app);
+    const { link } = (await (await createLink(app, owner.cookie, 'temp')).json()).data;
+    assert.equal((await uploadViaLink(app, link.uploadPath, 'before.txt', 'a')).res.status, 200);
+
+    // Revoke needs the session and the CSRF header.
+    const noHeader = await fetch(`${app.base}/api/upload-links/${link.id}`, {
+      method: 'DELETE',
+      headers: { Cookie: owner.cookie, Origin: app.base },
+    });
+    assert.equal(noHeader.status, 403);
+
+    const revoked = await authed(app, owner.cookie, `/api/upload-links/${link.id}`, { method: 'DELETE' });
+    assert.equal(revoked.status, 200);
+    const view = (await revoked.json()).data.link;
+    assert.equal(view.active, false);
+    assert.equal(view.uploadPath, null, 'a revoked link shows no path');
+
+    assert.equal((await fetch(`${app.base}${link.uploadPath}`)).status, 404);
+    const after = await uploadViaLink(app, link.uploadPath, 'after.txt', 'b');
+    assert.equal(after.res.status, 404);
+    assert.equal((await listFiles(app, owner.cookie)).data.files.map((f) => f.name).join(), 'before.txt');
+
+    // Revoking again is harmless.
+    assert.equal((await authed(app, owner.cookie, `/api/upload-links/${link.id}`, { method: 'DELETE' })).status, 200);
+  });
+});
+
+test('upload link: another user cannot revoke a link or see it, and a link never uploads into someone else\'s account', async () => {
+  await withApp({}, async (app) => {
+    const owner = await signup(app);
+    const other = await signup(app);
+    const { link } = (await (await createLink(app, owner.cookie, 'mine')).json()).data;
+
+    assert.equal((await authed(app, other.cookie, `/api/upload-links/${link.id}`, { method: 'DELETE' })).status, 404);
+    const theirs = await (await authed(app, other.cookie, '/api/upload-links')).json();
+    assert.equal(theirs.data.links.length, 0);
+    assert.equal((await authed(app, owner.cookie, `/api/upload-links/${link.id}`, { method: 'DELETE' })).status, 200);
+  });
+});
+
+test('upload link: multiple uploaders through one link all land in the owner\'s list, and other accounts see none', async () => {
+  await withApp({}, async (app) => {
+    const owner = await signup(app);
+    const bystander = await signup(app);
+    const { link } = (await (await createLink(app, owner.cookie, 'shared')).json()).data;
+    const names = ['one.txt', 'two.txt', 'three.txt'];
+    const results = await Promise.all(names.map((n) => uploadViaLink(app, link.uploadPath, n, `contents of ${n}`)));
+    for (const r of results) assert.equal(r.res.status, 200, r.text);
+
+    const { data } = await listFiles(app, owner.cookie);
+    assert.deepEqual(data.files.map((f) => f.name).sort(), names.slice().sort());
+    assert.ok(data.files.every((f) => f.viaLink));
+    assert.equal((await listFiles(app, bystander.cookie)).data.files.length, 0);
+    const links = await (await authed(app, owner.cookie, '/api/upload-links')).json();
+    assert.equal(links.data.links[0].uploads, 3);
+  });
+});
+
+test('upload link: a link stops at its own file limit, and uploads by the owner are not affected', async () => {
+  await withApp({ limits: { linkMaxFiles: 2 } }, async (app) => {
+    const owner = await signup(app);
+    const { link } = (await (await createLink(app, owner.cookie, '')).json()).data;
+    assert.equal((await uploadViaLink(app, link.uploadPath, 'a.txt', 'a')).res.status, 200);
+    assert.equal((await uploadViaLink(app, link.uploadPath, 'b.txt', 'b')).res.status, 200);
+    const third = await uploadViaLink(app, link.uploadPath, 'c.txt', 'c');
+    assert.equal(third.res.status, 507);
+    assert.match(third.text, /file limit/);
+    const own = await upload(app, owner.cookie, 'own.txt', 'owner file');
+    assert.equal(own.res.status, 201, 'the owner can still upload');
+  });
+});
+
+test('upload link: a link stops at its own size limit', async () => {
+  await withApp({ limits: { maxFileBytes: 1000, linkMaxBytes: 2500 } }, async (app) => {
+    const owner = await signup(app);
+    const { link } = (await (await createLink(app, owner.cookie)).json()).data;
+    assert.equal((await uploadViaLink(app, link.uploadPath, 'a.txt', 'x'.repeat(1000))).res.status, 200);
+    assert.equal((await uploadViaLink(app, link.uploadPath, 'b.txt', 'x'.repeat(1000))).res.status, 200);
+    const over = await uploadViaLink(app, link.uploadPath, 'c.txt', 'x'.repeat(1000));
+    assert.equal(over.res.status, 507);
+    assert.match(over.text, /size limit/);
+  });
+});
+
+test('upload link: uploads count toward the owner\'s account file cap', async () => {
+  await withApp({ limits: { maxFiles: 2 } }, async (app) => {
+    const owner = await signup(app);
+    const { link } = (await (await createLink(app, owner.cookie)).json()).data;
+    assert.equal((await upload(app, owner.cookie, 'own.txt', 'o')).res.status, 201);
+    assert.equal((await uploadViaLink(app, link.uploadPath, 'guest.txt', 'g')).res.status, 200);
+    const over = await uploadViaLink(app, link.uploadPath, 'more.txt', 'm');
+    assert.equal(over.res.status, 507);
+    assert.match(over.text, /keep up to 2 files/);
+  });
+});
+
+test('upload link: a file over the per-file cap is refused, and a bad page or token is 404', async () => {
+  await withApp({ limits: { maxFileBytes: 1000 } }, async (app) => {
+    const owner = await signup(app);
+    const { link } = (await (await createLink(app, owner.cookie)).json()).data;
+    const big = await uploadViaLink(app, link.uploadPath, 'big.txt', 'x'.repeat(5000));
+    assert.equal(big.res.status, 413);
+    assert.equal((await fetch(`${app.base}/u/${'A'.repeat(43)}`)).status, 404);
+    assert.equal((await fetch(`${app.base}/u/short`)).status, 404);
+    assert.equal((await listFiles(app, owner.cookie)).data.files.length, 0);
+  });
+});
+
+test('logs: upload, link, and sharing events print masked names and short references only', async () => {
+  const captured = [];
+  const original = console.log;
+  console.log = (...args) => captured.push(args.join(' '));
+  try {
+    await withApp({}, async (app) => {
+      const owner = await signup(app);
+      const secretName = 'Quarterly-Salary-Plan.txt';
+      const own = await upload(app, owner.cookie, secretName, 'numbers');
+      const fileId = own.body.data.file.id;
+      const made = await createLink(app, owner.cookie, 'Confidential label');
+      const { link } = (await made.json()).data;
+      const guest = await uploadViaLink(app, link.uploadPath, 'Board-Minutes-2026.pdf', '%PDF-1.4 minutes', { type: 'application/pdf' });
+      assert.equal(guest.res.status, 200, guest.text);
+      const shared = await putSharing(app, owner.cookie, fileId, true);
+      assert.equal(shared.status, 200);
+      const token = (await shared.json()).data.file.sharePath.slice(3);
+      await authed(app, owner.cookie, `/api/upload-links/${link.id}`, { method: 'DELETE' });
+
+      const log = captured.join('\n');
+      assert.match(log, /upload stored: file=Q…\.txt id=[a-f0-9]{8}/, 'masked name and short id');
+      assert.match(log, /upload stored: file=B…\.pdf/);
+      assert.match(log, /upload link created: link=[a-f0-9]{8}/);
+      assert.match(log, /link=[a-f0-9]{8}/);
+      assert.match(log, /share enabled: file=Q…\.txt/);
+      assert.match(log, /upload link revoked: link=[a-f0-9]{8}/);
+
+      // Nothing sensitive: no full name, no label, no token, no full link, no full id.
+      for (const secret of [secretName, 'Board-Minutes', 'Confidential', token, link.uploadPath, link.id, fileId, link.uploadPath.slice(3)]) {
+        assert.equal(log.includes(secret), false, `log must not contain ${secret.slice(0, 6)}…`);
+      }
+      assert.equal(/[a-f0-9]{32}/.test(log), false, 'no full 32-character id');
+      assert.equal(/[A-Za-z0-9_-]{43}/.test(log), false, 'no full token');
+    });
+  } finally {
+    console.log = original;
+  }
+});
+
+test('upload links: /u/ requests are limited per address, and the limit answers 429 with Retry-After', async () => {
+  await withApp({}, async (app) => {
+    const bogus = `${app.base}/u/${'A'.repeat(43)}`;
+    let last = null;
+    for (let i = 0; i <= 300; i++) {
+      last = await fetch(bogus);
+      await last.arrayBuffer();
+      if (last.status === 429) break;
+    }
+    assert.equal(last.status, 429, 'the 301st request from one address is refused');
+    assert.equal(last.headers.get('retry-after'), '900');
+  });
+});
+
+test('the per-file cap applies to chunked uploads too, through the owner and through an upload link', async () => {
+  await withApp({ limits: { maxFileBytes: 1000 } }, async (app) => {
+    const owner = await signup(app);
+    const { link } = (await (await createLink(app, owner.cookie)).json()).data;
+    const boundary = 'chunkedboundary' + crypto.randomBytes(4).toString('hex');
+    const head = `--${boundary}\r\nContent-Disposition: form-data; name="uploadId"\r\n\r\n${crypto.randomUUID()}\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="chunk.txt"\r\nContent-Type: text/plain\r\n\r\n`;
+    const tail = `\r\n--${boundary}--\r\n`;
+
+    // Sends the body with Transfer-Encoding: chunked (no Content-Length), so the size is only known while streaming.
+    const sendChunked = (path, headers) =>
+      new Promise((resolve, reject) => {
+        const url = new URL(`${app.base}${path}`);
+        const req = http.request(
+          { host: url.hostname, port: url.port, path: url.pathname, method: 'POST',
+            headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Transfer-Encoding': 'chunked', ...headers } },
+          (res) => {
+            let text = '';
+            res.on('data', (c) => (text += c));
+            res.on('end', () => resolve({ status: res.statusCode, text }));
+          },
+        );
+        req.on('error', (err) => resolve({ status: 0, text: String(err && err.code) }));
+        req.write(head);
+        for (let i = 0; i < 8; i++) req.write('x'.repeat(1000));
+        req.end(tail);
+      });
+
+    const viaOwner = await sendChunked('/api/files/upload', { Cookie: owner.cookie, 'X-Requested-With': 'fetch', Origin: app.base });
+    assert.equal(viaOwner.status, 413, 'owner chunked upload refused');
+    const viaLink = await sendChunked(`${link.uploadPath}/upload`, {});
+    assert.equal(viaLink.status, 413, 'link chunked upload refused');
+    assert.equal((await listFiles(app, owner.cookie)).data.files.length, 0, 'nothing was stored');
   });
 });

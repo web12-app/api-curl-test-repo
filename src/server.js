@@ -10,9 +10,9 @@ const { GitHubReleases } = require('./github-releases');
 const { RateLimiter } = require('./rate-limit');
 const { signup, login, loadUser, loadAccountRecord, sessionsValidAfter, revokeSessions, publicUser } = require('./accounts');
 const { COOKIE_NAME, createSession, readSession, parseCookies, sessionCookie, clearSessionCookie } = require('./session');
-const { FileService } = require('./files');
+const { FileService, SHARE_TOKEN_RE } = require('./files');
 const { receiveUpload, removeFile } = require('./upload');
-const { TYPES, ALLOWED_EXTENSIONS, CATEGORIES, sanitizeFilename, extensionOf, asciiFallback, encodeFilenameStar, contentMatches } = require('./file-types');
+const { typeFor, CATEGORIES, sanitizeFilename, extensionOf, asciiFallback, encodeFilenameStar, contentMatches, isPreviewable } = require('./file-types');
 const pages = require('./pages');
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -271,7 +271,8 @@ async function pageDashboard(ctx) {
     pages.dashboardPage(user, {
       filesEnabled: files.enabled,
       maxBytes: files.enabled ? files.service.limits.maxFileBytes : 0,
-      allowed: ALLOWED_EXTENSIONS,
+      linkMaxFiles: files.enabled ? files.service.limits.linkMaxFiles : 0,
+      linkMaxBytes: files.enabled ? files.service.limits.linkMaxBytes : 0,
     }),
   );
 }
@@ -345,23 +346,39 @@ async function apiListFiles(ctx) {
 
 // Global cap on uploads running at once. Each one holds a temp file on disk and a GitHub request open.
 // Requests over the cap get 429 right away and are not queued.
-async function apiUploadFile(ctx) {
-  const service = requireFileStorage(ctx);
+async function withUploadSlot(service, fn) {
   if (service.inFlight >= service.limits.maxConcurrentUploads) {
-    ctx.res.setHeader('Connection', 'close');
     throw new AppError(429, 'TOO_MANY_UPLOADS', 'The server is busy with other uploads. Try again shortly.');
   }
   service.inFlight += 1;
   try {
-    await uploadFileInner(ctx, service);
+    return await fn();
   } finally {
     service.inFlight -= 1;
   }
 }
 
+async function apiUploadFile(ctx) {
+  const service = requireFileStorage(ctx);
+  await withUploadSlot(service, () => uploadFileInner(ctx, service));
+}
+
 async function uploadFileInner(ctx, service) {
   const user = await requireUser(ctx);
   requireCsrfHeader(ctx);
+  const result = await storeUpload(ctx, service, {
+    uid: user.id,
+    linkId: null,
+    rateKey: `upload:${user.id}`,
+    perHour: UPLOADS_PER_HOUR,
+  });
+  ok(ctx, result.duplicate ? 200 : 201, { file: result.file });
+}
+
+// Receives one multipart upload and stores it under uid. Used by the owner's upload and by an upload link.
+// Any file type is accepted. Known types are checked against their signature. Unknown types are stored as
+// application/octet-stream and only ever sent as attachments.
+async function storeUpload(ctx, service, { uid, linkId, rateKey, perHour }) {
   const { limits } = service;
 
   const type = String(ctx.req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
@@ -375,8 +392,7 @@ async function uploadFileInner(ctx, service) {
     throw new AppError(413, 'FILE_TOO_LARGE', `Files must be ${Math.floor(limits.maxFileBytes / 1024 / 1024)} MB or smaller.`);
   }
 
-  const rateKey = `upload:${user.id}`;
-  if (ctx.auth.limiter.count(rateKey, UPLOAD_WINDOW_MS) >= UPLOADS_PER_HOUR) {
+  if (ctx.auth.limiter.count(rateKey, UPLOAD_WINDOW_MS) >= perHour) {
     ctx.res.setHeader('Connection', 'close');
     throw new AppError(429, 'RATE_LIMITED', 'Too many uploads. Try again later.');
   }
@@ -394,22 +410,21 @@ async function uploadFileInner(ctx, service) {
     const name = sanitizeFilename(received.file.filename);
     if (!name) throw new AppError(400, 'INVALID_FILENAME', 'Use a file name with letters or digits and an extension.');
     const ext = extensionOf(name);
-    const spec = TYPES[ext];
-    if (!spec) throw new AppError(415, 'UNSUPPORTED_FILE_TYPE', `Allowed types: ${ALLOWED_EXTENSIONS.join(', ')}.`);
+    const spec = typeFor(ext);
     const { size } = await fs.promises.stat(tmp);
     if (size === 0) throw new AppError(400, 'EMPTY_FILE', 'The file is empty.');
     if (!(await contentMatches(spec, tmp))) {
       throw new AppError(415, 'FILE_CONTENT_MISMATCH', 'The file contents do not match its type.');
     }
-    const result = await service.upload(user.id, {
+    return await service.upload(uid, {
       uploadId: received.fields.uploadId || '',
       tmpPath: tmp,
       size,
       name,
       spec,
       ext,
+      linkId,
     });
-    ok(ctx, result.duplicate ? 200 : 201, { file: result.file });
   } finally {
     await removeFile(tmp);
   }
@@ -420,32 +435,212 @@ function contentDisposition(name) {
   return `attachment; filename="${asciiFallback(name)}"; filename*=UTF-8''${encodeFilenameStar(name)}`;
 }
 
-async function apiDownloadFile(ctx) {
-  const service = requireFileStorage(ctx);
-  const user = await requireUser(ctx);
-  const { file, res: upstream } = await service.download(user.id, ctx.params.id);
-
+// Streams one stored file to the response. The stored size is checked against the record first, so a mismatch
+// is an error and not a truncated file. HEAD sends the headers only.
+async function streamFile(ctx, { file, res: upstream }, { disposition, extra = {} }) {
   const length = upstream.headers.get('content-length');
   if (!upstream.body || (length !== null && Number(length) !== file.size)) {
     await upstream.body?.cancel?.().catch(() => {});
     throw new StorageError('The stored file did not match its record.');
   }
+  const headers = { ...securityHeaders(), 'Content-Type': file.type, 'Content-Length': String(file.size), ...extra };
+  if (disposition) headers['Content-Disposition'] = disposition;
   if (ctx.req.method === 'HEAD') {
     await upstream.body.cancel().catch(() => {});
-    ctx.res.writeHead(200, { ...securityHeaders(), 'Content-Type': file.type, 'Content-Length': String(file.size) });
+    ctx.res.writeHead(200, headers);
     ctx.res.end();
     return;
   }
-  ctx.res.writeHead(200, {
-    ...securityHeaders(),
-    'Content-Type': file.type,
-    'Content-Length': String(file.size),
-    'Content-Disposition': contentDisposition(file.name),
-  });
+  ctx.res.writeHead(200, headers);
   const body = Readable.fromWeb(upstream.body);
   body.on('error', () => ctx.res.destroy());
   ctx.res.on('close', () => body.destroy());
   body.pipe(ctx.res);
+}
+
+// Inline display. Only previewable types reach here (see isPreviewable). The sandbox policy stops a previewed file
+// from running script or reaching the page. The frame is same-origin only, so the dashboard can embed it.
+// PDF needs the browser's built-in viewer, which the sandbox policy would block, so PDF gets a narrower policy.
+function previewHeaders(name) {
+  const pdf = extensionOf(name) === '.pdf';
+  return {
+    'X-Frame-Options': 'SAMEORIGIN',
+    'Content-Security-Policy': pdf
+      ? "default-src 'none'; object-src 'self'; frame-ancestors 'self'"
+      : "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; sandbox",
+  };
+}
+
+const previewDisposition = (name) => `inline; filename="${asciiFallback(name)}"; filename*=UTF-8''${encodeFilenameStar(name)}`;
+
+async function apiDownloadFile(ctx) {
+  const service = requireFileStorage(ctx);
+  const user = await requireUser(ctx);
+  const opened = await service.download(user.id, ctx.params.id);
+  await streamFile(ctx, opened, { disposition: contentDisposition(opened.file.name) });
+}
+
+async function apiPreviewFile(ctx) {
+  const service = requireFileStorage(ctx);
+  const user = await requireUser(ctx);
+  const entry = await service.readReady(user.id, ctx.params.id);
+  if (!isPreviewable(entry.name)) {
+    throw new AppError(415, 'PREVIEW_NOT_AVAILABLE', 'This file type cannot be previewed. Download it instead.');
+  }
+  const opened = await service.openEntry(entry);
+  await streamFile(ctx, opened, {
+    disposition: previewDisposition(entry.name),
+    extra: previewHeaders(entry.name),
+  });
+}
+
+// Turns sharing on or off. The body must be {"public": true} or {"public": false}.
+async function apiSetSharing(ctx) {
+  const service = requireFileStorage(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  if (!body || typeof body.public !== 'boolean') {
+    throw new AppError(400, 'INVALID_BODY', 'Send {"public": true} or {"public": false}.');
+  }
+  const { file } = await service.setSharing(user.id, ctx.params.id, body.public);
+  ok(ctx, 200, { file });
+}
+
+// ---- public share links. No login. Anyone with the link can read the file it names, and nothing else.
+
+const SHARE_WINDOW_MS = 15 * 60 * 1000;
+const SHARE_REQUESTS_PER_WINDOW = 300; // per client address; the 256-bit token already makes guessing impractical
+
+function shareRateLimit(ctx) {
+  const key = `share:${ctx.ip}`;
+  if (ctx.auth.limiter.count(key, SHARE_WINDOW_MS) >= SHARE_REQUESTS_PER_WINDOW) {
+    throw new AppError(429, 'RATE_LIMITED', 'Too many requests. Try again later.');
+  }
+  ctx.auth.limiter.record(key);
+}
+
+const SHARE_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'";
+
+async function pageShare(ctx) {
+  const service = requireFileStorage(ctx);
+  shareRateLimit(ctx);
+  const token = ctx.params.id;
+  const found = await service.resolveShare(token);
+  if (!found) throw new AppError(404, 'NOT_FOUND', 'This link is not available.');
+  const e = found.entry;
+  sendHtml(
+    ctx.res,
+    200,
+    pages.sharePage({ name: e.name, size: e.size, type: e.type, previewable: isPreviewable(e.name) }, token),
+    { 'Content-Security-Policy': SHARE_PAGE_CSP },
+  );
+}
+
+async function shareDownload(ctx) {
+  const service = requireFileStorage(ctx);
+  shareRateLimit(ctx);
+  const opened = await service.downloadShared(ctx.params.id);
+  await streamFile(ctx, opened, { disposition: contentDisposition(opened.file.name) });
+}
+
+async function sharePreview(ctx) {
+  const service = requireFileStorage(ctx);
+  shareRateLimit(ctx);
+  const found = await service.resolveShare(ctx.params.id);
+  if (!found || !isPreviewable(found.entry.name)) {
+    throw new AppError(404, 'NOT_FOUND', 'This link is not available.');
+  }
+  const opened = await service.openEntry(found.entry);
+  await streamFile(ctx, opened, {
+    disposition: previewDisposition(found.entry.name),
+    extra: previewHeaders(found.entry.name),
+  });
+}
+
+// ---- upload links. The owner creates a link. Anyone with the link can add one file at a time, with no login.
+
+async function apiListUploadLinks(ctx) {
+  const service = requireFileStorage(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { links: await service.listUploadLinks(user.id) });
+}
+
+async function apiCreateUploadLink(ctx) {
+  const service = requireFileStorage(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = (await readJsonBody(ctx)) || {};
+  if (typeof body.label !== 'undefined' && typeof body.label !== 'string') {
+    throw new AppError(400, 'INVALID_LABEL', 'The label must be text.');
+  }
+  // Labels are shown to people who use the link. Control characters are removed and the length is capped.
+  const label = (body.label || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 60);
+  ok(ctx, 201, { link: await service.createUploadLink(user.id, label) });
+}
+
+async function apiRevokeUploadLink(ctx) {
+  const service = requireFileStorage(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  ok(ctx, 200, { link: await service.revokeUploadLink(user.id, ctx.params.id) });
+}
+
+// ---- public upload page for a link. No login, no cookies. The link token is the credential.
+
+const LINK_WINDOW_MS = 15 * 60 * 1000;
+const LINK_REQUESTS_PER_WINDOW = 300; // per client address, for every /u/ request
+const LINK_UPLOADS_PER_HOUR = 30; // per client address, for uploads through any link
+
+function linkRateLimit(ctx) {
+  const key = `link:${ctx.ip}`;
+  if (ctx.auth.limiter.count(key, LINK_WINDOW_MS) >= LINK_REQUESTS_PER_WINDOW) {
+    throw new AppError(429, 'RATE_LIMITED', 'Too many requests. Try again later.');
+  }
+  ctx.auth.limiter.record(key);
+}
+
+const UPLOAD_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+// A closed link (revoked, or never existed) answers 404 with no hint which.
+async function openLinkOr404(ctx, service) {
+  const open = await service.resolveUploadLink(ctx.params.id);
+  if (!open) throw new AppError(404, 'NOT_FOUND', 'This upload link is not available.');
+  return open;
+}
+
+async function pageUploadLink(ctx) {
+  const service = requireFileStorage(ctx);
+  linkRateLimit(ctx);
+  const open = await openLinkOr404(ctx, service);
+  sendHtml(
+    ctx.res,
+    200,
+    pages.uploadPage({ label: open.link.label, token: ctx.params.id, maxBytes: service.limits.maxFileBytes }),
+    { 'Content-Security-Policy': UPLOAD_PAGE_CSP },
+  );
+}
+
+// Plain multipart form post. No script is needed. The token is the credential, so this route is exempt from
+// the same-origin check that guards the other POST routes. It takes no cookies and is rate-limited per address.
+async function postUploadLink(ctx) {
+  const service = requireFileStorage(ctx);
+  linkRateLimit(ctx);
+  const open = await openLinkOr404(ctx, service);
+  const result = await withUploadSlot(service, () =>
+    storeUpload(ctx, service, {
+      uid: open.uid,
+      linkId: open.link.id,
+      rateKey: `linkupload:${ctx.ip}`,
+      perHour: LINK_UPLOADS_PER_HOUR,
+    }),
+  );
+  sendHtml(
+    ctx.res,
+    200,
+    pages.uploadDonePage({ name: result.file.name, token: ctx.params.id }),
+    { 'Content-Security-Policy': UPLOAD_PAGE_CSP },
+  );
 }
 
 async function apiDeleteFile(ctx) {
@@ -456,6 +651,8 @@ async function apiDeleteFile(ctx) {
 }
 
 const FILE_ID = '([a-f0-9]{32})';
+const LINK_ID = '([a-f0-9]{32})';
+const TOKEN = SHARE_TOKEN_RE.source.slice(1, -1);
 
 const ROUTES = [
   { method: 'GET', path: '/', handler: pageHome },
@@ -474,6 +671,16 @@ const ROUTES = [
   { method: 'POST', path: '/api/files/upload', handler: apiUploadFile },
   { method: 'GET', pattern: new RegExp(`^/api/files/${FILE_ID}/download$`), handler: apiDownloadFile },
   { method: 'DELETE', pattern: new RegExp(`^/api/files/${FILE_ID}$`), handler: apiDeleteFile },
+  { method: 'GET', pattern: new RegExp(`^/api/files/${FILE_ID}/preview$`), handler: apiPreviewFile },
+  { method: 'PUT', pattern: new RegExp(`^/api/files/${FILE_ID}/sharing$`), handler: apiSetSharing },
+  { method: 'GET', pattern: new RegExp(`^/s/(${TOKEN})$`), handler: pageShare },
+  { method: 'GET', pattern: new RegExp(`^/s/(${TOKEN})/download$`), handler: shareDownload },
+  { method: 'GET', pattern: new RegExp(`^/s/(${TOKEN})/preview$`), handler: sharePreview },
+  { method: 'GET', path: '/api/upload-links', handler: apiListUploadLinks },
+  { method: 'POST', path: '/api/upload-links', handler: apiCreateUploadLink },
+  { method: 'DELETE', pattern: new RegExp(`^/api/upload-links/${LINK_ID}$`), handler: apiRevokeUploadLink },
+  { method: 'GET', pattern: new RegExp(`^/u/(${TOKEN})$`), handler: pageUploadLink },
+  { method: 'POST', pattern: new RegExp(`^/u/(${TOKEN})/upload$`), handler: postUploadLink, csrfExempt: true },
 ];
 
 // Returns every route whose path matches, with any path parameters.
@@ -532,7 +739,7 @@ async function dispatch(req, res, auth, corsOrigins) {
   if (isApi && method === 'OPTIONS') {
     // Preflight. Without an allowed origin there are no CORS headers, so the browser blocks the request.
     if (corsAllowed) {
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
       res.setHeader('Access-Control-Max-Age', '600');
     }
@@ -550,7 +757,8 @@ async function dispatch(req, res, auth, corsOrigins) {
   }
   ctx.params = hit.params;
 
-  if (method !== 'GET' && !sameOrigin(req, corsOrigins)) {
+  // csrfExempt routes are protected by their own credential (the link token), so the same-origin check does not apply.
+  if (method !== 'GET' && !hit.route.csrfExempt && !sameOrigin(req, corsOrigins)) {
     return fail(ctx, 403, 'CROSS_SITE_REFUSED', 'Cross-site requests are refused.');
   }
 

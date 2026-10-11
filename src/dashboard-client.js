@@ -8,19 +8,24 @@ function dashboardClient() {
   if (!root || root.getAttribute('data-enabled') !== '1') return;
 
   var MAX_BYTES = Number(root.getAttribute('data-max-bytes')) || 0;
-  var ALLOWED = (root.getAttribute('data-allowed') || '').split(',').filter(Boolean);
   var table = document.getElementById('files');
   var tbody = table.querySelector('tbody');
   var statusEl = document.getElementById('files-status');
   var notices = document.getElementById('notices');
   var queue = document.getElementById('queue');
   var quotaEl = document.getElementById('quota');
+  var linkForm = document.getElementById('link-form');
+  var linkLabel = document.getElementById('link-label');
+  var linkResult = document.getElementById('link-result');
+  var linkStatus = document.getElementById('links-status');
+  var linkRows = document.getElementById('links');
   var search = document.getElementById('search');
   var category = document.getElementById('category');
   var picker = document.getElementById('picker');
   var drop = document.getElementById('drop');
   var pickBtn = document.getElementById('pick');
   var searchTimer = null;
+  var preview = document.getElementById('preview');
 
   function el(tag, props, children) {
     var node = document.createElement(tag);
@@ -67,7 +72,10 @@ function dashboardClient() {
       el('button', { type: 'button', className: 'linklike', text: 'Dismiss', onclick: function () { box.remove(); } }),
     ]);
     notices.appendChild(box);
-    if (kind === 'success') setTimeout(function () { if (box.parentNode) box.remove(); }, 6000);
+    // Keep the stack short, so old messages do not pile up over the list.
+    while (notices.children.length > 4) notices.removeChild(notices.firstChild);
+    // Messages go away on their own, so they do not stay over the list.
+    setTimeout(function () { if (box.parentNode) box.remove(); }, kind === 'success' ? 6000 : 10000);
   }
 
   async function api(url, options) {
@@ -89,10 +97,9 @@ function dashboardClient() {
     return (err && err.message) || ('Request failed (' + result.status + ').');
   }
 
+  // Only the file count is shown. There is no storage total.
   function renderQuota(q) {
-    quotaEl.textContent = '';
-    quotaEl.appendChild(el('span', { text: fmtSize(q.usedBytes) + ' of ' + fmtSize(q.limitBytes) + ' used · ' + q.count + ' of ' + q.maxFiles + ' files' }));
-    quotaEl.appendChild(el('progress', { max: String(q.limitBytes), value: String(q.usedBytes), 'aria-label': 'Storage used' }));
+    quotaEl.textContent = q.count + ' of ' + q.maxFiles + ' files';
   }
 
   function deleteButton(file) {
@@ -105,21 +112,86 @@ function dashboardClient() {
     });
   }
 
+  function openPreview(file) {
+    var frame = document.getElementById('preview-frame');
+    document.getElementById('preview-title').textContent = file.name;
+    frame.setAttribute('src', '/api/files/' + file.id + '/preview');
+    frame.setAttribute('title', 'Preview of ' + file.name);
+    if (typeof preview.showModal === 'function') preview.showModal();
+    else preview.setAttribute('open', '');
+  }
+
+  function closePreview() {
+    if (typeof preview.close === 'function') preview.close();
+    else preview.removeAttribute('open');
+    document.getElementById('preview-frame').setAttribute('src', 'about:blank');
+  }
+
+  function copyText(text, input) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        function () { notify('success', 'Link copied.'); },
+        function () { input.select(); notify('error', 'Copy failed. The link is selected; copy it by hand.'); }
+      );
+      return;
+    }
+    input.select();
+    notify('success', 'The link is selected. Press Ctrl+C to copy.');
+  }
+
+  // Share link box, shown only for public files. The full link is built from this page's origin; the server
+  // gives only the path.
+  function shareBox(file) {
+    var url = window.location.origin + file.sharePath;
+    var input = el('input', { type: 'text', readonly: 'readonly', value: url, 'aria-label': 'Share link for ' + file.name });
+    input.value = url;
+    return el('div', { className: 'share-box' }, [
+      input,
+      el('button', { type: 'button', text: 'Copy link', onclick: function () { copyText(url, input); } }),
+      el('a', { className: 'button', href: file.sharePath, target: '_blank', rel: 'noopener', text: 'Open' }),
+    ]);
+  }
+
+  async function setSharing(file, makePublic) {
+    var result = await api('/api/files/' + file.id + '/sharing', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public: makePublic }),
+    });
+    if (result.ok) notify('success', makePublic ? file.name + ' is now shared. Anyone with the link can open it.' : file.name + ' is private again. The old link no longer works.');
+    else notify('error', 'Could not change sharing for ' + file.name + ': ' + messageOf(result), result.status === 401);
+    loadFiles();
+  }
+
   function renderFiles(files) {
     tbody.textContent = '';
     files.forEach(function (file) {
       var nameCell = el('td', { 'data-label': 'Name' }, [file.name]);
+      nameCell.appendChild(el('span', { className: 'badge' + (file.visibility === 'public' ? ' public' : ''), text: file.visibility === 'public' ? 'Public' : 'Private' }));
+      if (file.viaLink) nameCell.appendChild(el('span', { className: 'badge', text: 'From upload link' }));
       if (file.status === 'deleting') nameCell.appendChild(el('span', { className: 'badge', text: 'Deleting…' }));
+      var buttons = [];
+      if (file.previewable) {
+        buttons.push(el('button', { type: 'button', text: 'Preview', 'aria-label': 'Preview ' + file.name, onclick: function () { openPreview(file); } }));
+      }
+      buttons.push(el('a', { className: 'button', href: '/api/files/' + file.id + '/download', download: file.name, text: 'Download' }));
+      if (file.status !== 'deleting') {
+        buttons.push(el('button', {
+          type: 'button',
+          text: file.visibility === 'public' ? 'Stop sharing' : 'Share',
+          'aria-label': (file.visibility === 'public' ? 'Stop sharing ' : 'Share ') + file.name,
+          onclick: function () { setSharing(file, file.visibility !== 'public'); },
+        }));
+      }
+      buttons.push(deleteButton(file));
+      var actionsCell = el('td', { 'data-label': 'Actions', className: 'actions' }, [el('div', { className: 'stack' }, buttons)]);
+      if (file.visibility === 'public' && file.sharePath) actionsCell.appendChild(shareBox(file));
       var row = el('tr', null, [
         nameCell,
         el('td', { 'data-label': 'Type', text: file.type.split(';')[0] }),
         el('td', { 'data-label': 'Size', text: fmtSize(file.size) }),
         el('td', { 'data-label': 'Uploaded', text: fmtDate(file.uploadedAt) }),
-        el('td', { 'data-label': 'Actions', className: 'actions' }, [
-          el('a', { className: 'button', href: '/api/files/' + file.id + '/download', download: file.name, text: 'Download' }),
-          ' ',
-          deleteButton(file),
-        ]),
+        actionsCell,
       ]);
       tbody.appendChild(row);
     });
@@ -156,9 +228,6 @@ function dashboardClient() {
       return 'Too large. The limit is ' + fmtSize(MAX_BYTES) + '.';
     }
     if (file.size === 0) return 'The file is empty.';
-    var dot = file.name.lastIndexOf('.');
-    var ext = dot >= 0 ? file.name.slice(dot).toLowerCase() : '';
-    if (ALLOWED.indexOf(ext) === -1) return 'This file type is not allowed.';
     return null;
   }
 
@@ -244,6 +313,84 @@ function dashboardClient() {
     loadFiles();
   }
 
+  // ---- upload links. The server returns the path only; the full link is built from this page's origin.
+
+  function linkBox(link) {
+    var url = window.location.origin + link.uploadPath;
+    var input = el('input', { type: 'text', readonly: 'readonly', 'aria-label': 'Upload link' + (link.label ? ' for ' + link.label : '') });
+    input.value = url;
+    return el('div', { className: 'share-box' }, [
+      input,
+      el('button', { type: 'button', text: 'Copy link', onclick: function () { copyText(url, input); } }),
+    ]);
+  }
+
+  function renderLinks(links) {
+    linkRows.querySelector('tbody').textContent = '';
+    links.forEach(function (link) {
+      var buttons = [];
+      if (link.active) {
+        buttons.push(el('button', {
+          type: 'button',
+          className: 'danger',
+          text: 'Revoke',
+          'aria-label': 'Revoke upload link' + (link.label ? ' ' + link.label : ''),
+          onclick: function () { revokeLink(link); },
+        }));
+      }
+      var actionsCell = el('td', { 'data-label': 'Actions', className: 'actions' }, [el('div', { className: 'stack' }, buttons)]);
+      if (link.active) actionsCell.appendChild(linkBox(link));
+      var row = el('tr', null, [
+        el('td', { 'data-label': 'Label', text: link.label || '(no label)' }),
+        el('td', { 'data-label': 'Status' }, [el('span', { className: 'badge' + (link.active ? ' public' : ''), text: link.active ? 'Open' : 'Revoked' })]),
+        el('td', { 'data-label': 'Uploads', text: link.uploads + ' file(s) · ' + fmtSize(link.usedBytes) }),
+        el('td', { 'data-label': 'Created', text: fmtDate(link.createdAt) }),
+        actionsCell,
+      ]);
+      linkRows.querySelector('tbody').appendChild(row);
+    });
+  }
+
+  async function loadLinks() {
+    var result = await api('/api/upload-links');
+    if (!result.ok) {
+      linkStatus.className = 'error';
+      linkStatus.textContent = 'Could not load upload links. ' + messageOf(result);
+      return;
+    }
+    linkStatus.className = '';
+    var links = result.body.data.links;
+    linkStatus.textContent = links.length ? '' : 'No upload links yet.';
+    renderLinks(links);
+  }
+
+  async function revokeLink(link) {
+    if (!window.confirm('Revoke this upload link? Anyone with it will no longer be able to upload. Files already uploaded stay.')) return;
+    var result = await api('/api/upload-links/' + link.id, { method: 'DELETE' });
+    if (result.ok) notify('success', 'Upload link revoked.');
+    else notify('error', 'Could not revoke the link: ' + messageOf(result), result.status === 401);
+    linkResult.textContent = '';
+    loadLinks();
+  }
+
+  linkForm.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var result = await api('/api/upload-links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: linkLabel.value.trim() }),
+    });
+    if (!result.ok) {
+      notify('error', 'Could not create the link: ' + messageOf(result), result.status === 401);
+      return;
+    }
+    linkResult.textContent = '';
+    linkResult.appendChild(el('p', { text: 'Link created. Anyone with this link can upload files to your account. Copy it now, and revoke it when you are done.' }));
+    linkResult.appendChild(linkBox(result.body.data.link));
+    linkLabel.value = '';
+    loadLinks();
+  });
+
   // ---- wiring
 
   pickBtn.addEventListener('click', function () { picker.click(); });
@@ -270,8 +417,11 @@ function dashboardClient() {
     searchTimer = setTimeout(loadFiles, 300);
   });
   category.addEventListener('change', loadFiles);
+  document.getElementById('preview-close').addEventListener('click', closePreview);
+  preview.addEventListener('close', function () { document.getElementById('preview-frame').setAttribute('src', 'about:blank'); });
 
   loadFiles();
+  loadLinks();
 }
 
 module.exports = { dashboardClient };
