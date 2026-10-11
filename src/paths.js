@@ -1,0 +1,24 @@
+'use strict';
+
+// The only paths this app writes to in the private data repository. Client input never becomes a path
+// unless it matches these patterns exactly.
+const USER_ID_RE = /^[a-f0-9]{32}$/;
+const USERNAME_RE = /^[a-z0-9_]{3,32}$/;
+const ALLOWED_PATH_RE = /^(users\/[a-f0-9]{32}\.json|system\/usernames\/[a-z0-9_]{3,32}\.json)$/;
+
+function userPath(userId) {
+  if (!USER_ID_RE.test(userId)) throw new Error('invalid user id');
+  return `users/${userId}.json`;
+}
+
+function usernamePath(username) {
+  if (!USERNAME_RE.test(username)) throw new Error('invalid username');
+  return `system/usernames/${username}.json`;
+}
+
+function assertAllowedPath(path) {
+  if (!ALLOWED_PATH_RE.test(path)) throw new Error('path not allowed');
+  return path;
+}
+
+module.exports = { USERNAME_RE, userPath, usernamePath, assertAllowedPath };
