@@ -22,13 +22,19 @@
 <body>
   <div class="card">
     <h1>Log in</h1>
-    <p>Log in on the app server to open your apps and files.</p><div class="actions"><a class="btn" data-app href="__APP_URL__/login">Continue to log in</a><a class="btn secondary" href="../signup/">Sign up</a></div><p><a href="../">Home</a></p>
+    <form method="post" action="__APP_URL__/login">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" required autocomplete="username">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" required autocomplete="current-password">
+      <button class="btn" id="submit" type="submit">Log in</button>
+    </form>
+    <p>New here? <a href="../signup/">Sign up</a> · <a href="../">Home</a></p>
     <p class="note" id="note"></p>
   </div>
   <script>
-    // Forms and sessions live on the app server (cookies are tied to it). This page only links there.
     if (!"__APP_URL__") {
-      document.querySelectorAll("a[data-app]").forEach(a => { a.removeAttribute("href"); a.setAttribute("aria-disabled", "true"); });
+      document.getElementById("submit").disabled = true;
       document.getElementById("note").textContent = "Log in is not available yet: the app server is not configured (APP_URL).";
     }
   </script>

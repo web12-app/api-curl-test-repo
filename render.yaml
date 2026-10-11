@@ -1,0 +1,31 @@
+# Render blueprint for the Next.js platform (web UI + API in one service).
+# Create it in Render: New > Blueprint > pick this repo and the platform-v1 branch.
+# Values marked sync: false are entered in the Render dashboard. Never commit them.
+services:
+  - type: web
+    name: pips-platform
+    runtime: node
+    plan: free
+    branch: platform-v1
+    rootDir: web
+    buildCommand: npm ci && npm run build
+    # Single process: rate limits are kept in memory, so multiple instances would multiply them.
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: API_KEY_HASH_SECRET
+        generateValue: true
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: PRIVATE_DATA_REPO
+        value: web12-app/api-curl-private-data
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: COOKIE_SAMESITE
+        value: Lax
+      - key: LEGACY_API_KEY
+        sync: false
