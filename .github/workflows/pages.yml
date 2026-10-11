@@ -1,0 +1,55 @@
+name: Deploy welcome page to GitHub Pages
+
+# Static welcome page only. The app and API run on Render (see render.yaml).
+# The build copies pages/ and fills in the app URL. No Python, no secrets.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Reads APP_URL from the github-pages environment variables.
+    environment: github-pages
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build static site
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          set -euo pipefail
+          APP_URL="${APP_URL%/}"
+          # Ignore an APP_URL that points at this Pages site. Linking the buttons to themselves is never useful.
+          pages_base="https://$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]').github.io/${GITHUB_REPOSITORY#*/}"
+          if [ -n "$APP_URL" ] && [ "$(echo "$APP_URL" | tr '[:upper:]' '[:lower:]')" = "$(echo "$pages_base" | tr '[:upper:]' '[:lower:]')" ]; then
+            echo "::warning::APP_URL is this Pages site ($pages_base). Set it to the app's URL. Login and signup stay disabled until then."
+            APP_URL=""
+          fi
+          rm -rf _site && mkdir _site
+          cp -r pages/. _site/
+          # APP_URL is the public Render URL, for example https://pips-platform.onrender.com
+          find _site -name '*.html' -exec sed -i "s|__APP_URL__|${APP_URL}|g" {} +
+          touch _site/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
