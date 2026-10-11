@@ -1,84 +1,66 @@
-# Node.js app
+# File storage app
 
-A minimal Node.js web app with no third-party dependencies. It has a home page, signup, login, and a dashboard. Accounts are stored in a private GitHub repository, and passwords are stored only as scrypt hashes.
+A Node.js web app with accounts, a personal file dashboard, previews, public share links, and anonymous upload links. Accounts and file metadata live in a private GitHub repository. File bytes live as release assets in a second private repository. Nothing is stored on the server's disk except short-lived temporary uploads.
 
-## Run
+**Full documentation is in [`docs/`](docs/README.md).**
+
+## Quick start
 
 Requires Node.js 20 or later.
 
 ```bash
-npm start            # listens on PORT (default 3000)
-PORT=8080 npm start
+npm ci
+cp .env.example .env        # then fill in the values (names only in the example)
+node --env-file=.env src/server.js
 ```
 
-Without login configuration, the public pages and `/api/health` still work. Login and signup routes return `503` and name the missing settings.
+Open <http://localhost:3000>. Sign up, then drag a file onto the dashboard.
 
-## Routes
+Without configuration the home page and `/api/health` still work. Login and files report which settings are missing, by name.
 
-| Route | Method | Purpose |
-| --- | --- | --- |
-| `/` | GET | Home page (welcome, and login/signup or dashboard links) |
-| `/signup`, `/login` | GET | Forms. POST posts a form and redirects to `/dashboard` |
-| `/dashboard` | GET | Signed-in page. Redirects to `/login` without a session |
-| `/logout` | POST | Clears the session |
-| `/api/health` | GET | `{"status":"ok"}` |
-| `/api/signup` | POST | JSON `{username, password}`. Returns `201` and sets the session cookie |
-| `/api/login` | POST | JSON `{username, password}`. Returns `200` and sets the session cookie |
-| `/api/logout` | POST | Clears the session |
-| `/api/me` | GET | `{"success":true,"data":{"user":...}}`, with `user` null when signed out |
+## What it does
 
-Usernames are 3–32 characters: letters (case-insensitive, stored in lowercase), digits, and underscores. Passwords are 8–256 characters.
+- Sign up and log in. Passwords are stored only as scrypt hashes.
+- Upload any file type, up to 25 MB per file. Known types are checked against their content.
+- Preview images, PDF, text, video, and audio. Other types download only.
+- Share a file with a link that anyone can open. Links can be turned off at any time.
+- Create an upload link that lets someone without an account send you a file. Links are limited per link and can be revoked.
 
-## Configuration
+## Documentation
 
-Set these in the environment. Never put values in the repo. See `.env.example`.
-
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `GITHUB_TOKEN` | yes | Token with read/write access to the private data repo only |
-| `PRIVATE_DATA_REPO` | yes | `owner/name` of the private data repo |
-| `SESSION_SECRET` | yes | At least 32 random characters. Signs session cookies |
-| `SESSION_HOURS` | no | Session length, default 12 |
-| `COOKIE_SECURE` | no | Set `0` only for plain-http local runs |
-| `TRUST_PROXY` | no | Set `1` only behind a proxy that overwrites `X-Forwarded-For` |
-| `PORT` | no | Default 3000 |
-| `CORS_ALLOWED_ORIGINS` | no | Comma-separated exact origins (for example `https://host.example`) allowed to call `/api/` from a browser with cookies. No wildcard. Empty means no cross-origin access |
-
-Generate a session secret with `openssl rand -hex 32`.
-
-### How data is stored
-
-- `system/usernames/<name>.json`: claims a username. It maps to the user id.
-- `users/<id>.json`: `{id, username, password_hash, created_at}`. The hash is `scrypt$N$r$p$salt$hash`.
-
-Writes use the GitHub Contents API. Writes are never retried automatically. A conflict returns `409`.
-
-Rate limits are in memory, per process: login 5 failures per account and 30 per address in 15 minutes, signup 10 per address per hour. Each process has its own counts.
-
-## Test
-
-```bash
-npm test
-```
-
-Tests use Node's built-in test runner (`node --test`), so no install step is needed. They use an in-memory store and a fake GitHub client. No network access is needed.
+| Document | Contents |
+| --- | --- |
+| [Getting started](docs/getting-started.md) | Run it on your computer |
+| [Configuration](docs/configuration.md) | Environment variables, limits, GitHub secrets and variables |
+| [User guide](docs/user-guide.md) | Using the dashboard |
+| [API reference](docs/api.md) | Every route, codes, headers, and limits |
+| [Architecture and security](docs/architecture.md) | Data layout, upload and sharing flows, security controls |
+| [Operations](docs/operations.md) | The live-tunnel workflow, run summaries, troubleshooting |
+| [Testing](docs/testing.md) | `npm test`, what each test file covers |
 
 ## Layout
 
 ```
-package.json              scripts: start, test
-.env.example              configuration names (no values)
-src/server.js             HTTP routes and entry point
-src/config.js             reads and checks environment settings
-src/accounts.js           signup, login, user lookup
-src/passwords.js          scrypt hashing
-src/session.js            signed session cookies
-src/rate-limit.js         in-memory limits
-src/github-storage.js     GitHub Contents API client (private data repo)
-src/memory-storage.js     in-memory store for tests
-src/files.js              file records, uploads, sharing, and upload links
-src/file-types.js         known types, content checks, and which types preview inline
-src/redact.js             masked names and short references for logs
-src/pages.js              HTML templates
-test/                     node:test suites
+src/server.js           HTTP routes, sessions, CSRF and origin checks, rate limits
+src/files.js            file records, uploads, sharing, upload links
+src/upload.js           streaming multipart parsing (busboy) with size limits
+src/file-types.js       allowed types, content checks, previewable types
+src/accounts.js         signup, login, lockout rules
+src/session.js          signed session cookies
+src/passwords.js        scrypt hashing
+src/config.js           environment settings (names are reported, never values)
+src/paths.js            the only paths the app writes in the private data repo
+src/redact.js           masked names and short references for logs
+src/github-storage.js   Contents API client (private data repo)
+src/github-releases.js  Releases API client (storage repo)
+src/pages.js            HTML pages
+src/dashboard-client.js dashboard browser code
+pages/                  static welcome pages (not served by the Node app)
+.github/workflows/      live-tunnel.yml: run the app on a GitHub runner with an ngrok domain
+test/                   node:test suites and a fake GitHub
+docs/                   documentation
 ```
+
+## Security in one paragraph
+
+Secrets come only from environment variables and are never written to the repository, logs, pages, or browser code. The GitHub token stays on the server. Share and upload-link tokens are random 256-bit values that are looked up by hash. Previews run in a sandbox, and unknown or active types (HTML, SVG) are never shown inline. The repository is public, so logs are masked. See [Architecture and security](docs/architecture.md).

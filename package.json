@@ -2,7 +2,7 @@
   "name": "nodejs-app",
   "version": "1.0.0",
   "private": true,
-  "description": "Minimal Node.js web app (no dependencies).",
+  "description": "Node.js web app: accounts, file storage in private GitHub repositories, previews, share and upload links.",
   "main": "src/server.js",
   "engines": {
     "node": ">=20"
