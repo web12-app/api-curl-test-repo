@@ -1,13 +1,18 @@
-# Run the app on a GitHub runner and expose it through the ngrok domain. Start it manually, any time.
+# Run the app on a GitHub runner and expose it through the ngrok domain.
+#
+# Start it from the Actions tab (Run workflow). When a run reaches its time limit and shuts down cleanly,
+# it requests one follow-up run of this workflow on main, with the same duration and one fewer automatic restart.
+# The chain stops when auto_restarts reaches 0, when a run fails (tests, configuration, app, or tunnel), or when a
+# dispatch fails. Each follow-up waits in the live-tunnel queue until the previous run has stopped its tunnel.
 #
 # Only one ngrok agent can hold the domain at a time. Stop any other tunnel on the domain first, or this run fails.
-# The run ends after the number of minutes you enter (1-300), or sooner if the app or tunnel stops.
 #
 # Secrets (Settings > Secrets and variables > Actions > Secrets):
 #   NGROK_AUTHTOKEN     ngrok auth token
 #   PRIVATE_DATA_TOKEN  GitHub token with read/write access to the private data repo only
 #   SESSION_SECRET      at least 32 random characters
-# Nothing secret is printed. The job summary shows only the public URL and the run status.
+# Nothing secret is printed. The follow-up request uses this run's built-in GITHUB_TOKEN, which can only dispatch
+# and list runs of this repository.
 
 name: Live app on ngrok
 
@@ -18,10 +23,15 @@ on:
         description: "How long to keep the tunnel open (1-300)"
         required: true
         default: "60"
+      auto_restarts:
+        description: "How many follow-up runs to request automatically when a run reaches its time limit (0-100)"
+        required: true
+        default: "24"
 
 permissions:
   contents: read
 
+# One run at a time. A follow-up run waits here until the current run has released the tunnel.
 concurrency:
   group: live-tunnel
   cancel-in-progress: false
@@ -34,16 +44,21 @@ env:
   # ngrok agent download, pinned by SHA-256. A new ngrok release changes the hash and fails the run until this is updated.
   NGROK_SHA256: cec0b4997fcc5f529dfc74bac89050354d11a915f968720600039738fdf330cf
   APP_PORT: "3000"
+  WORKFLOW_FILE: live-tunnel.yml
 
 jobs:
   live:
     name: Run app and tunnel
     runs-on: ubuntu-24.04
     timeout-minutes: 330
+    outputs:
+      # "true" only when the run reached its time limit with the app and tunnel healthy and shut down cleanly.
+      expired: ${{ steps.keep.outputs.expired }}
     steps:
       - name: Check inputs and secrets
         env:
           MINUTES: ${{ inputs.minutes }}
+          AUTO_RESTARTS: ${{ inputs.auto_restarts }}
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
@@ -52,6 +67,10 @@ jobs:
           failed=0
           if ! [[ "$MINUTES" =~ ^[0-9]+$ ]] || [ "$MINUTES" -lt 1 ] || [ "$MINUTES" -gt 300 ]; then
             echo "::error::minutes must be a whole number from 1 to 300."
+            failed=1
+          fi
+          if ! [[ "$AUTO_RESTARTS" =~ ^[0-9]+$ ]] || [ "$AUTO_RESTARTS" -gt 100 ]; then
+            echo "::error::auto_restarts must be a whole number from 0 to 100."
             failed=1
           fi
           [ -n "$NGROK_AUTHTOKEN" ] || { echo "::error::Secret NGROK_AUTHTOKEN is not set."; failed=1; }
@@ -89,9 +108,15 @@ jobs:
         run: |
           set -uo pipefail
           # Config comes from the environment only. The app never logs secret values.
-          PORT="$APP_PORT" TRUST_PROXY=1 nohup npm start > app.log 2>&1 &
+          # Node runs directly (not through npm) so the PID we track is the server itself.
+          PORT="$APP_PORT" TRUST_PROXY=1 nohup node src/server.js > app.log 2>&1 &
           echo $! > app.pid
+          code=000
           for attempt in $(seq 1 30); do
+            if ! kill -0 "$(cat app.pid)" 2>/dev/null; then
+              echo "::error::The app process exited during startup."
+              exit 1
+            fi
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$APP_PORT/api/health") || code=000
             if [ "$code" = "200" ]; then
               echo "App is up locally (attempt $attempt)."
@@ -110,23 +135,32 @@ jobs:
           ngrok config add-authtoken "$NGROK_AUTHTOKEN" > /dev/null
           nohup ngrok http "$APP_PORT" --url="https://$NGROK_DOMAIN" --log=stdout > ngrok.log 2>&1 &
           echo $! > ngrok.pid
+          code=000
           for attempt in $(seq 1 30); do
+            if ! kill -0 "$(cat ngrok.pid)" 2>/dev/null; then
+              echo "::error::The ngrok process exited. Another agent may still hold $NGROK_DOMAIN."
+              exit 1
+            fi
+            # The public health check is the readiness gate: the service counts as live only when it passes.
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'ngrok-skip-browser-warning: 1' "https://$NGROK_DOMAIN/api/health") || code=000
             if [ "$code" = "200" ]; then
-              echo "Tunnel is live (attempt $attempt)."
+              echo "Tunnel is live and the public health check passed (attempt $attempt)."
               exit 0
             fi
             sleep 3
           done
-          echo "::error::The tunnel did not come up (last HTTP status: $code). Check that no other tunnel is using $NGROK_DOMAIN."
+          echo "::error::The public health check did not pass (last HTTP status: $code). Check that no other tunnel is using $NGROK_DOMAIN."
           exit 1
 
       - name: Keep running
+        id: keep
         env:
           MINUTES: ${{ inputs.minutes }}
         run: |
           set -uo pipefail
           end=$(( $(date +%s) + MINUTES * 60 ))
+          failures=0
+          last_probe=0
           while [ "$(date +%s)" -lt "$end" ]; do
             if ! kill -0 "$(cat app.pid)" 2>/dev/null; then
               echo "::error::The app stopped early."
@@ -136,31 +170,160 @@ jobs:
               echo "::error::The tunnel stopped early."
               exit 1
             fi
-            sleep 30
+            now=$(date +%s)
+            if [ $((now - last_probe)) -ge 60 ]; then
+              last_probe=$now
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'ngrok-skip-browser-warning: 1' "https://$NGROK_DOMAIN/api/health") || code=000
+              if [ "$code" = "200" ]; then
+                failures=0
+              else
+                failures=$((failures + 1))
+                echo "Public health check failed (HTTP $code). $failures in a row."
+              fi
+              if [ "$failures" -ge 3 ]; then
+                echo "::error::The public health check failed 3 times in a row."
+                exit 1
+              fi
+            fi
+            sleep 15
           done
-          echo "Time is up. Stopping."
+          echo "Time limit reached. Stopping cleanly."
+          echo "expired=true" >> "$GITHUB_OUTPUT"
 
       - name: Stop processes
         if: always()
         run: |
-          for f in app.pid ngrok.pid; do
-            if [ -f "$f" ]; then kill "$(cat "$f")" 2>/dev/null || true; fi
-          done
-          echo "Stopped."
+          set -uo pipefail
+          # Stop the tunnel first so the domain is released, then the app. Each gets 20 s to exit before SIGKILL.
+          stop_pid() {
+            local file="$1" name="$2" pid
+            [ -f "$file" ] || { echo "$name: no PID file"; return 0; }
+            pid=$(cat "$file")
+            if ! kill -0 "$pid" 2>/dev/null; then echo "$name: already stopped"; return 0; fi
+            kill -TERM "$pid" 2>/dev/null || true
+            for _ in $(seq 1 20); do
+              if ! kill -0 "$pid" 2>/dev/null; then echo "$name: stopped"; return 0; fi
+              sleep 1
+            done
+            kill -KILL "$pid" 2>/dev/null || true
+            echo "$name: did not stop within 20 s, killed"
+          }
+          stop_pid ngrok.pid "ngrok tunnel"
+          stop_pid app.pid "app"
+          true
 
-      - name: Write summary
+      - name: Diagnostics (redacted)
+        if: failure()
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+          PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+        run: |
+          python3 - <<'EOF'
+          import os
+          secrets = [os.environ.get(k, "") for k in ("NGROK_AUTHTOKEN", "PRIVATE_DATA_TOKEN", "SESSION_SECRET")]
+          for name in ("app.log", "ngrok.log"):
+              if not os.path.exists(name):
+                  print(f"{name}: not written")
+                  continue
+              lines = open(name, errors="replace").read().splitlines()[-40:]
+              print(f"--- {name} (last {len(lines)} lines, secrets redacted)")
+              for line in lines:
+                  for s in secrets:
+                      if s:
+                          line = line.replace(s, "[REDACTED]")
+                  print(line)
+          EOF
+
+      - name: Write run summary
         if: always()
         env:
-          RUN_OUTCOME: ${{ job.status }}
+          KEEP_OUTCOME: ${{ steps.keep.outcome }}
           REQUESTED_MINUTES: ${{ inputs.minutes }}
+          REQUESTED_RESTARTS: ${{ inputs.auto_restarts }}
         run: |
           {
-            echo "## Live app on ngrok"
+            echo "## Live app on ngrok: this run"
             echo ""
             echo "| Item | Value |"
             echo "| --- | --- |"
             echo "| Public URL | https://${NGROK_DOMAIN} |"
-            echo "| Minutes requested | ${REQUESTED_MINUTES} |"
-            echo "| Job status | ${RUN_OUTCOME} |"
+            echo "| Minutes | ${REQUESTED_MINUTES} |"
+            echo "| Automatic restarts left (requested) | ${REQUESTED_RESTARTS} |"
+            echo "| Run ended | ${KEEP_OUTCOME:-not reached} |"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
+
+  next:
+    name: Request next run
+    # Runs only after the live job has finished, so the tunnel is already released.
+    # Skipped when the live job failed or was cancelled.
+    needs: live
+    if: needs.live.outputs.expired == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      CURRENT_RUN_ID: ${{ github.run_id }}
+      MINUTES: ${{ inputs.minutes }}
+      AUTO_RESTARTS: ${{ inputs.auto_restarts }}
+    steps:
+      - name: Request the next run
+        run: |
+          set -uo pipefail
+          summary() {
+            {
+              echo "## Next run"
+              echo ""
+              echo "$1"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          if [ "$AUTO_RESTARTS" -lt 1 ]; then
+            summary "**Not requested.** The automatic restart limit is used up. Start the workflow manually to continue."
+            exit 0
+          fi
+          next_restarts=$((AUTO_RESTARTS - 1))
+
+          # Duplicate guard: if another run is already queued or running, do not add another.
+          gh run list --repo "$REPO" --workflow "$WORKFLOW_FILE" --branch main --limit 50 \
+            --json databaseId,status,url > runs.json || { echo "::error::Could not list runs."; exit 1; }
+          active=$(jq -c --argjson self "$CURRENT_RUN_ID" '[.[] | select(.databaseId != $self)
+            | select(.status == "queued" or .status == "in_progress" or .status == "waiting"
+                     or .status == "pending" or .status == "requested")]' runs.json)
+          if [ "$(echo "$active" | jq 'length')" -gt 0 ]; then
+            other=$(echo "$active" | jq -r '.[0].url')
+            summary "**Not requested.** Another run is already queued or running: $other. It will continue the service."
+            exit 0
+          fi
+
+          since=$(date -u -d '-10 seconds' +%Y-%m-%dT%H:%M:%SZ)
+          if ! gh workflow run "$WORKFLOW_FILE" --repo "$REPO" --ref main \
+              -f minutes="$MINUTES" -f auto_restarts="$next_restarts" > dispatch.log 2>&1; then
+            echo "::error::The dispatch call failed. No retry was made."
+            summary "**Not requested.** The dispatch call failed. No retry was made. Start the workflow manually to continue."
+            exit 1
+          fi
+
+          # Confirm that the new run exists before reporting success.
+          new_run=""
+          for _ in $(seq 1 12); do
+            sleep 5
+            gh run list --repo "$REPO" --workflow "$WORKFLOW_FILE" --branch main --limit 10 \
+              --json databaseId,status,url,createdAt,event > recent.json || continue
+            new_run=$(jq -r --argjson self "$CURRENT_RUN_ID" --arg since "$since" \
+              '[.[] | select(.databaseId != $self and .event == "workflow_dispatch" and .createdAt >= $since)]
+               | sort_by(.createdAt) | last | .url // empty' recent.json)
+            [ -n "$new_run" ] && break
+          done
+          if [ -n "$new_run" ]; then
+            summary "**Requested.** Next run: $new_run. It starts after this run releases the tunnel, with $MINUTES minutes and $next_restarts automatic restarts left."
+          else
+            echo "::warning::The dispatch was accepted, but the new run was not visible within 60 seconds."
+            summary "**Dispatch accepted, but not confirmed.** The new run was not visible within 60 seconds. Check the Actions tab before relying on the chain."
+          fi
