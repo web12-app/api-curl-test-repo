@@ -13,6 +13,7 @@ const { ENV, DATA_REPO, startFake, startApp, withApp, signup, authed, sha256, pi
 
 const KB = 1024;
 const MB = 1024 * 1024;
+const GB = 1024 * MB;
 const CHUNK = 256 * KB;
 // Exactly `bytes` bytes of ASCII text, so the content check passes for a .txt file. Sizes are chosen per test so the
 // file splits into the number of pieces that test expects (a piece is at least 256 KB).
@@ -187,12 +188,12 @@ test('pieces may arrive in any order, and a repeated piece changes nothing', asy
   });
 });
 
-test('the default piece size is 2 MB, and the whole file is one piece when it is smaller', async () => {
+test('the default piece size is 8 MB, and the whole file is one piece when it is smaller', async () => {
   await withApp(fake, {}, async (app) => {
     const user = await signup(app);
     const big = await initUpload(app, user.cookie, { name: 'big.txt', size: 5 * MB });
-    assert.equal(big.body.data.session.chunkBytes, 2 * MB);
-    assert.equal(big.body.data.session.chunkCount, 3);
+    assert.equal(big.body.data.session.chunkBytes, 8 * MB);
+    assert.equal(big.body.data.session.chunkCount, 1);
     const small = await initUpload(app, user.cookie, { name: 'small.txt', size: 10 });
     assert.equal(small.body.data.session.chunkCount, 1);
     assert.equal(small.status, 201);
@@ -556,15 +557,15 @@ test('init validates the name, size, piece size, and upload id', async () => {
 
 // ---- limits
 
-test('the 25 MB cap applies at init: one byte over is refused, exactly 25 MB is accepted', async () => {
+test('the per-file cap applies at init: one byte over is refused, exactly at the cap is accepted', async () => {
   await withApp(fake, {}, async (app) => {
     const user = await signup(app);
-    const over = await initUpload(app, user.cookie, { name: 'big.txt', size: 25 * MB + 1 });
+    const over = await initUpload(app, user.cookie, { name: 'big.txt', size: 2 * GB + 1 });
     assert.equal(over.status, 413);
     assert.equal(over.body.error.code, 'FILE_TOO_LARGE');
-    const exact = await initUpload(app, user.cookie, { name: 'big.txt', size: 25 * MB, chunkBytes: CHUNK });
+    const exact = await initUpload(app, user.cookie, { name: 'big.txt', size: 2 * GB, chunkBytes: 8 * MB });
     assert.equal(exact.status, 201);
-    assert.equal(exact.body.data.session.chunkCount, 100, '25 MB in 256 KB pieces');
+    assert.equal(exact.body.data.session.chunkCount, 256, '2 GB in 8 MB pieces');
   });
 });
 
@@ -867,7 +868,7 @@ test('logs show a masked name and short references, never the full name or sessi
 // ---- settings
 
 test('upload settings: defaults stay, valid values apply, and bad values name the setting', () => {
-  assert.deepEqual(loadUploadSettings({}), { ok: true, limits: { chunks: {} }, tempDir: null });
+  assert.deepEqual(loadUploadSettings({}), { ok: true, limits: { chunks: {}, importAllowPrivate: false }, tempDir: null });
   const good = loadUploadSettings({ UPLOAD_CHUNK_BYTES: '524288', UPLOAD_SESSION_HOURS: '6', FILE_TEMP_DIR: '/var/tmp/files' });
   assert.equal(good.ok, true);
   assert.equal(good.limits.chunks.chunkBytes, 524288);

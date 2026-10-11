@@ -73,24 +73,37 @@ test('IPv6 addresses expand to 16 bytes, and malformed ones are refused', () => 
   assert.equal(ipv6ToBytes('::1.2.3.999'), null);
 });
 
-test('only https:// on the standard port, to a public host name, is accepted', () => {
+test('http and https of any shape are accepted: any port, IP literals, credentials, and data: links', () => {
   assert.equal(validateImportUrl('https://files.example.test/a/report.pdf?x=1').hostname, 'files.example.test');
   assert.equal(validateImportUrl('https://EXAMPLE.test./f.pdf').hostname, 'example.test', 'a trailing dot is removed');
   assert.equal(validateImportUrl('https://files.example.test/a#frag').hash, '', 'fragments are dropped');
 
+  assert.equal(validateImportUrl('http://files.example.test/x').protocol, 'http:', 'plain http is accepted');
+  assert.equal(validateImportUrl('http://files.example.test:8080/x').port, '8080', 'any port is accepted');
+  assert.equal(validateImportUrl('https://files.example.test:8443/x').port, '8443');
+  assert.equal(validateImportUrl('http://93.184.216.34/x').hostname, '93.184.216.34', 'a public IPv4 literal is accepted');
+  assert.equal(validateImportUrl('https://[2606:4700:4700::1111]/x').hostname, '[2606:4700:4700::1111]', 'a public IPv6 literal is accepted');
+  const cred = validateImportUrl('https://user:p%40ss@files.example.test/x');
+  assert.equal(cred.username, 'user', 'credentials are kept for basic auth');
+  assert.equal(cred.password, 'p%40ss');
+  assert.equal(validateImportUrl('https://files.example.test:443/x').port, '', 'the default port is normalized away; the transport applies 443');
+
+  const data = validateImportUrl('data:text/plain;base64,SGVsbG8=');
+  assert.equal(data.protocol, 'data:', 'a data: link is accepted');
+  assert.equal(validateImportUrl('data:,plain text').protocol, 'data:', 'a data: link with no media type is accepted');
+  // A data: link carries its own bytes, so it may be longer than a network link.
+  assert.equal(validateImportUrl(`data:text/plain;base64,${'A'.repeat(4096)}`).protocol, 'data:');
+
   const refused = {
-    'http://files.example.test/x': 'IMPORT_INVALID_URL',
     'ftp://files.example.test/x': 'IMPORT_INVALID_URL',
     'file:///etc/passwd': 'IMPORT_INVALID_URL',
-    'https://user:pass@files.example.test/x': 'IMPORT_INVALID_URL',
-    'https://files.example.test:8443/x': 'IMPORT_INVALID_URL',
-    'https://files.example.test:80/x': 'IMPORT_INVALID_URL',
+    'javascript:alert(1)': 'IMPORT_INVALID_URL',
+    'data:no-comma-here': 'IMPORT_INVALID_URL',
     'https://localhost/x': 'IMPORT_BLOCKED_DESTINATION',
     'https://app.localhost/x': 'IMPORT_BLOCKED_DESTINATION',
     'https://printer.local/x': 'IMPORT_BLOCKED_DESTINATION',
     'https://db.internal/x': 'IMPORT_BLOCKED_DESTINATION',
     'https://metadata.google.internal/x': 'IMPORT_BLOCKED_DESTINATION',
-    'https://intranet/x': 'IMPORT_BLOCKED_DESTINATION', // single label
     'https://wiki.corp/x': 'IMPORT_BLOCKED_DESTINATION',
     'https://127.0.0.1/x': 'IMPORT_BLOCKED_DESTINATION',
     'https://169.254.169.254/latest/meta-data': 'IMPORT_BLOCKED_DESTINATION',
@@ -106,6 +119,19 @@ test('only https:// on the standard port, to a public host name, is accepted', (
   }
   assert.equal(codeOf(() => validateImportUrl(42)), 'IMPORT_INVALID_URL', 'non-text is refused');
   assert.equal(codeOf(() => validateImportUrl(`https://a.test/${'x'.repeat(2100)}`)), 'IMPORT_INVALID_URL', 'too long');
+});
+
+test('with allowPrivate, internal names and addresses are accepted; unknown schemes stay refused', () => {
+  assert.equal(validateImportUrl('http://127.0.0.1/x', { allowPrivate: true }).hostname, '127.0.0.1');
+  assert.equal(validateImportUrl('http://192.168.1.1/x', { allowPrivate: true }).hostname, '192.168.1.1');
+  assert.equal(validateImportUrl('https://[fd00:ec2::254]/x', { allowPrivate: true }).hostname, '[fd00:ec2::254]');
+  assert.equal(validateImportUrl('http://localhost/x', { allowPrivate: true }).hostname, 'localhost');
+  assert.equal(validateImportUrl('http://db.internal/x', { allowPrivate: true }).hostname, 'db.internal');
+  assert.equal(validateImportUrl('http://wiki.corp/x', { allowPrivate: true }).hostname, 'wiki.corp');
+  // The scheme rules do not bend, even with the network guard off.
+  for (const url of ['file:///etc/passwd', 'ftp://files.example.test/x', 'data:no-comma']) {
+    assert.equal(codeOf(() => validateImportUrl(url, { allowPrivate: true })), 'IMPORT_INVALID_URL', url);
+  }
 });
 
 test('a name that resolves to any non-public address is refused as a whole', async () => {

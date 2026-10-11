@@ -95,6 +95,7 @@ function buildFiles(env, authConfig, storage, now, overrides) {
       transport: url.transport,
       timeouts: url.timeouts,
       limits: overrides.importLimits,
+      allowPrivate: url.allowPrivate !== undefined ? url.allowPrivate === true : limits.importAllowPrivate === true,
     }),
   };
 }

@@ -21,10 +21,11 @@ Without configuration the home page and `/api/health` still work. Login and file
 ## What it does
 
 - Sign up and log in. Passwords are stored only as scrypt hashes.
-- Upload any file type, up to 25 MB per file. Known types are checked against their content.
+- Upload any file type, up to 2 GB per file (GitHub's own asset limit). Files of 4 MB and more are sent in pieces automatically, so an interrupted upload resumes instead of restarting. Known types are checked against their content.
 - Preview images, PDF, text, video, and audio. Other types download only.
 - Share a file with a link that anyone can open. Links can be turned off at any time.
 - Create an upload link that lets someone without an account send you a file. Links are limited per link and can be revoked.
+- Import a file from a public https:// URL. The download runs in the background and survives a page reload.
 
 ## Documentation
 

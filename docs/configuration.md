@@ -36,11 +36,12 @@ These three variables tune the piece-by-piece upload and the temp directory. Lea
 
 | Variable | Default | Allowed values | Purpose |
 | --- | --- | --- | --- |
-| `UPLOAD_CHUNK_BYTES` | 2 MiB | Whole number from 256 KiB (262144) to 8 MiB (8388608) | Size of each piece. The browser uses the size the server returns when a session opens. |
+| `UPLOAD_CHUNK_BYTES` | 8 MiB | Whole number from 256 KiB (262144) to 8 MiB (8388608) | Size of each piece. The browser uses the size the server returns when a session opens. |
 | `UPLOAD_SESSION_HOURS` | 24 | From 1 to 168 | How long an unfinished upload may live. Idle sessions are dropped after 2 hours with no new piece. |
 | `FILE_TEMP_DIR` | OS temp directory | An absolute path | Where pieces and in-progress files are kept. Use a persistent disk if uploads should survive a restart. It is never served over HTTP. |
+| `IMPORT_ALLOW_PRIVATE` | off | `1` / `true` / `yes` / `on` turn it on | Lets URL imports reach loopback, private ranges, and internal names (an internal file server, for example). Without it, imports reach only public internet addresses, and a refused link's error says this setting exists. |
 
-The 25 MB per-file cap is not one of these settings. It stays at 25 MB. A change to it needs a separate, reviewed change to the code default.
+The per-file ceiling is **2 GB**, GitHub's own limit for one release asset. It is a code default in `src/files.js` (`DEFAULT_LIMITS`), not an environment setting, and it exists because GitHub refuses larger assets. A change to it needs a separate, reviewed change to the code default.
 
 ## Limits
 
@@ -48,22 +49,22 @@ These are set in code (`src/files.js`, `DEFAULT_LIMITS`; `src/chunked-uploads.js
 
 | Limit | Default | Where it applies |
 | --- | --- | --- |
-| Per-file size | 25 MB | Every upload: owner, chunked, and upload link. |
-| Files per account | 200 | Counts ready and in-progress files. Upload-link uploads count too. |
+| Per-file size | 2 GB | Every upload: owner, chunked, and upload link. GitHub's own asset limit. |
+| Files per account | No limit | Counted and reported, but not capped by default (`maxFiles: Infinity`). Tests pass small finite numbers. |
 | Uploads per user per hour | 60 | Owner uploads (in `src/server.js`). |
 | Concurrent uploads | 4 | The whole server. More gets `429 TOO_MANY_UPLOADS`. |
 | Active upload links per account | 20 | `maxLinks` |
 | Files per upload link | 20 | `linkMaxFiles` |
 | Bytes per upload link | 500 MB | `linkMaxBytes` |
 | Upload-link uploads per address per hour | 30 | `LINK_UPLOADS_PER_HOUR` (in `src/server.js`) |
-| Pieces per upload | 400 | `maxChunks`. More than this is refused with `TOO_MANY_CHUNKS`. |
+| Pieces per upload | 512 | `maxChunks`. More than this is refused with `TOO_MANY_CHUNKS`. |
 | Open piece uploads per account / on the server | 3 / 50 | `maxSessionsPerUser`, `maxSessionsTotal` |
 | Piece requests per account per hour | 6000 | `CHUNK_REQUESTS_PER_HOUR` (in `src/server.js`) |
 | URL imports running at once, server-wide / per account | 3 / 2 | `maxConcurrentImports`, `maxConcurrentPerUser` |
 | URL import starts per account per hour | 30 | `importsPerHour`. Retries count. |
-| URL import download, whole job | 120 s | `totalTimeoutMs`. Connect 10 s, silence 30 s, up to 3 redirects. |
+| URL import download, whole job | 30 min | `totalTimeoutMs`. Connect 10 s, silence 30 s, up to 3 redirects. Imports run in the background; a page reload does not stop them. |
 
-There is **no total storage quota**. The only storage limit is the file count.
+There is **no total storage quota**, and by default **no file count limit** either. The real ceilings are the 2 GB per-file asset limit and GitHub's own storage.
 
 ## Repository variables and secrets (GitHub Actions)
 

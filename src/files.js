@@ -19,10 +19,14 @@ const { isPreviewable } = require('./file-types');
 const { GitHubError } = require('./github-releases');
 
 const MB = 1024 * 1024;
+const GB = 1024 * MB;
 const DEFAULT_LIMITS = {
-  maxFileBytes: 25 * MB, // per file
-  // There is no total storage quota. The per-user file count below keeps the manifest small enough to read in one request.
-  maxFiles: 200,
+  // GitHub itself caps one release asset at 2 GiB, so that is the real ceiling. There is no smaller app cap:
+  // large files are sent automatically in pieces, and the browser shows the size this service reports.
+  maxFileBytes: 2 * GB, // per file
+  // No file count limit. The manifest is the whole file list, so it grows with use; the room checks below
+  // skip the count entirely when this limit is not finite. Tests pass small finite numbers.
+  maxFiles: Infinity,
   maxConcurrentUploads: 4, // the server keeps uploads on disk while they are checked
   linkMaxFiles: 20, // per upload link: files it may bring in
   linkMaxBytes: 500 * MB, // per upload link: total bytes it may bring in
@@ -205,7 +209,7 @@ class FileService {
   async assertRoom(uid) {
     const stored = await this.storage.readJson(manifestPath(uid));
     const used = usage(stored ? stored.data.files : []);
-    if (used.count >= this.limits.maxFiles) {
+    if (Number.isFinite(this.limits.maxFiles) && used.count >= this.limits.maxFiles) {
       throw new AppError(507, 'FILE_LIMIT_REACHED', `You can keep up to ${this.limits.maxFiles} files.`);
     }
   }
@@ -234,7 +238,7 @@ class FileService {
           throw new AppError(409, 'UPLOAD_ID_USED', 'This file was already deleted. Start a new upload.');
         }
         const used = usage(m.files);
-        if (used.count >= this.limits.maxFiles) {
+        if (Number.isFinite(this.limits.maxFiles) && used.count >= this.limits.maxFiles) {
           throw new AppError(507, 'FILE_LIMIT_REACHED', `You can keep up to ${this.limits.maxFiles} files.`);
         }
         if (linkId) {

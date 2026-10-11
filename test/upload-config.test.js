@@ -19,13 +19,26 @@ function authWith(extra, base = ENV) {
 }
 
 test('no upload settings: defaults apply and nothing is overridden', () => {
-  assert.deepEqual(loadUploadSettings({}), { ok: true, limits: { chunks: {} }, tempDir: null });
+  assert.deepEqual(loadUploadSettings({}), { ok: true, limits: { chunks: {}, importAllowPrivate: false }, tempDir: null });
   // Blank values count as unset.
   assert.deepEqual(loadUploadSettings({ UPLOAD_CHUNK_BYTES: '  ', UPLOAD_SESSION_HOURS: '', FILE_TEMP_DIR: ' ' }), {
     ok: true,
-    limits: { chunks: {} },
+    limits: { chunks: {}, importAllowPrivate: false },
     tempDir: null,
   });
+});
+
+test('IMPORT_ALLOW_PRIVATE opens imports to internal addresses only on a truthy value', () => {
+  for (const value of ['1', 'true', 'TRUE', ' yes ', 'on']) {
+    const res = loadUploadSettings({ IMPORT_ALLOW_PRIVATE: value });
+    assert.equal(res.ok, true, value);
+    assert.equal(res.limits.importAllowPrivate, true, value);
+  }
+  for (const value of ['', '0', 'false', 'no', 'off', '2', 'maybe']) {
+    const res = loadUploadSettings({ IMPORT_ALLOW_PRIVATE: value });
+    assert.equal(res.ok, true, value);
+    assert.equal(res.limits.importAllowPrivate, false, value);
+  }
 });
 
 test('piece size accepts exactly 256 KiB to 8 MiB, and surrounding spaces are ignored', () => {
@@ -127,5 +140,5 @@ test('the explore page shows the URL import form next to the drop zone when stor
   const form = html.indexOf('id="url-form"');
   assert.ok(drop > 0 && form > drop, 'the form follows the drop zone');
   assert.match(html, /Upload from URL/);
-  assert.match(html, /placeholder="Enter direct file URL"/);
+  assert.match(html, /placeholder="Paste any file link \(http, https, data:\)"/);
 });

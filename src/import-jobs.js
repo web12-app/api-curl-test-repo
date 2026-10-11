@@ -1,6 +1,7 @@
 'use strict';
 
-// Imports a file from a public https:// link. A job runs in the background and the client polls its state.
+// Imports a file from a public http:// or https:// link (or a data: link). A job runs in the background and the
+// client polls its state.
 //
 // Rules this module keeps:
 // - Jobs are keyed by (owner, client upload id). A repeat request while a job runs returns that job, so a double
@@ -52,8 +53,8 @@ function viewOf(job) {
 }
 
 class ImportJobs {
-  // service: the FileService. downloader, lookup, transport, and timeouts are injectable for tests.
-  constructor({ service, now, downloader = downloadToFile, lookup, transport, timeouts, limits }) {
+  // service: the FileService. downloader, lookup, transport, timeouts, and allowPrivate are injectable for tests.
+  constructor({ service, now, downloader = downloadToFile, lookup, transport, timeouts, limits, allowPrivate }) {
     this.service = service;
     this.now = now || service.now;
     this.downloader = downloader;
@@ -61,6 +62,8 @@ class ImportJobs {
     this.transport = transport;
     this.timeouts = timeouts;
     this.limits = { ...IMPORT_LIMITS, ...(limits || {}) };
+    // When true, imports may reach loopback, private ranges, and internal names (IMPORT_ALLOW_PRIVATE=1).
+    this.allowPrivate = allowPrivate === true;
     this.jobs = new Map();
   }
 
@@ -71,7 +74,7 @@ class ImportJobs {
     if (!UPLOAD_ID_RE.test(typeof uploadId === 'string' ? uploadId : '')) {
       throw new AppError(400, 'INVALID_UPLOAD_ID', 'The upload id must be a UUID.');
     }
-    const parsed = validateImportUrl(url);
+    const parsed = validateImportUrl(url, { allowPrivate: this.allowPrivate });
     this.sweep();
 
     const key = jobKey(uid, uploadId);
@@ -99,7 +102,7 @@ class ImportJobs {
       uid,
       uploadId,
       url: parsed.href, // in memory only, for the download (validated again at each hop)
-      host: parsed.hostname,
+      host: parsed.hostname || parsed.protocol.replace(':', ''),
       fingerprint: urlFingerprint(parsed.href),
       state: 'queued',
       name: null,
@@ -143,6 +146,7 @@ class ImportJobs {
         transport: this.transport,
         timeouts: this.timeouts,
         signal: job.controller.signal,
+        allowPrivate: this.allowPrivate,
         onProgress: (n) => {
           job.downloaded = n;
         },

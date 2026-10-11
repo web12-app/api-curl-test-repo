@@ -4,7 +4,7 @@ All JSON routes return one of two shapes:
 
 ```json
 { "success": true,  "data": { } }
-{ "success": false, "error": { "code": "FILE_TOO_LARGE", "message": "Files must be 25 MB or smaller." } }
+{ "success": false, "error": { "code": "FILE_TOO_LARGE", "message": "Files must be 2048 MB or smaller." } }
 ```
 
 Clients should branch on `error.code`, not on `message`, which may change.
@@ -87,7 +87,7 @@ Response `200`:
 
 Response `201` (or `200` for a repeat) with `data.file`, the same shape as list items.
 
-Errors: `400 INVALID_UPLOAD_ID`, `400 INVALID_FILENAME`, `400 EMPTY_FILE`, `400 FILE_REQUIRED`, `400 INVALID_MULTIPART`, `400 TOO_MANY_PARTS`, `400 TOO_MANY_FILES`, `400 UPLOAD_INTERRUPTED`, `413 FILE_TOO_LARGE` (over 25 MB; refused before the body is read when `Content-Length` says so, otherwise while streaming), `415 UNSUPPORTED_MEDIA_TYPE` (not multipart), `415 FILE_CONTENT_MISMATCH`, `409 UPLOAD_ID_USED`, `409 UPLOAD_IN_PROGRESS`, `507 FILE_LIMIT_REACHED` (200 files), `429 RATE_LIMITED` (60 per hour), `429 TOO_MANY_UPLOADS` (4 at once), `503 BUSY`, `503 UPSTREAM_ERROR`.
+Errors: `400 INVALID_UPLOAD_ID`, `400 INVALID_FILENAME`, `400 EMPTY_FILE`, `400 FILE_REQUIRED`, `400 INVALID_MULTIPART`, `400 TOO_MANY_PARTS`, `400 TOO_MANY_FILES`, `400 UPLOAD_INTERRUPTED`, `413 FILE_TOO_LARGE` (over 2 GB, GitHub's asset ceiling; refused before the body is read when `Content-Length` says so, otherwise while streaming), `415 UNSUPPORTED_MEDIA_TYPE` (not multipart), `415 FILE_CONTENT_MISMATCH`, `409 UPLOAD_ID_USED`, `409 UPLOAD_IN_PROGRESS`, `507 FILE_LIMIT_REACHED` (only when a file-count limit is configured; there is none by default), `429 RATE_LIMITED` (60 per hour), `429 TOO_MANY_UPLOADS` (4 at once), `503 BUSY`, `503 UPSTREAM_ERROR`.
 
 Example with curl:
 
@@ -99,7 +99,7 @@ curl -b cookies.txt -H 'X-Requested-With: fetch' -H 'Origin: http://localhost:30
 
 ### Piece-by-piece upload (large files)
 
-The browser sends files of 4 MB or more in pieces, so an interrupted upload can resume. The same flow works for any client. Each piece is checked with its own SHA-256, and the whole file is checked again when it is joined. The same 25 MB cap applies.
+The browser sends files of 4 MB or more in pieces, so an interrupted upload can resume. The same flow works for any client. Each piece is checked with its own SHA-256, and the whole file is checked again when it is joined. The same 2 GB ceiling applies.
 
 | Method and path | Body | Result |
 | --- | --- | --- |
@@ -115,7 +115,7 @@ Retrying a piece is safe. Sending the same piece again with the same bytes retur
 
 ### Upload from URL
 
-The server downloads a file from a public `https://` link. It works in the background, and the client polls it. Only the owner of an import can see or cancel it. The link itself is kept only in memory for the life of the import, and only its host is returned.
+The server downloads a file from an `http://` or `https://` link of any shape: any port, an IP address instead of a name, or a `user:password@` link for servers that need basic auth. A `data:` link is also accepted — its bytes are decoded directly, so no network is used (it must still fit the API body limit of 16 KB). It works in the background, and the client polls it. Only the owner of an import can see or cancel it. The link itself is kept only in memory for the life of the import, and only its host is returned.
 
 | Method and path | Body | Result |
 | --- | --- | --- |
@@ -125,7 +125,7 @@ The server downloads a file from a public `https://` link. It works in the backg
 
 The job view has `uploadId`, `host`, `state`, `name`, `size`, `downloaded` (bytes so far), `error` (`code` and `message`), `file` (once stored), and `updatedAt`. States: `queued`, `downloading`, `checking`, `storing`, `completed`, `failed`, `cancelled`.
 
-Errors: `400 IMPORT_INVALID_URL` (not https, has a user name or password, is too long, or is not a valid link), `400 IMPORT_BLOCKED_DESTINATION` (the host name or its address is private, local, or otherwise not public), `404 NOT_FOUND` (unknown, or not yours), `409 IMPORT_NOT_CANCELLABLE` (being saved), `409 IMPORT_ALREADY_DONE`, `429 IMPORT_BUSY` or `429 RATE_LIMITED` (too many running or too many starts), `409 IMPORT_CANCELLED`, `502 IMPORT_DNS_FAILED`, `502 IMPORT_UPSTREAM_ERROR`, `502 IMPORT_UPSTREAM_STATUS` (the host answered with an error status), `502 IMPORT_UNSUPPORTED_ENCODING`, `502 IMPORT_INTERRUPTED` (the download stopped early), `502 IMPORT_TOO_MANY_REDIRECTS`, `502 IMPORT_BAD_REDIRECT`, `504 IMPORT_TIMEOUT`, `413 FILE_TOO_LARGE`, `415 FILE_CONTENT_MISMATCH`. A failed import shows its error in `error`, not as an HTTP error on the GET.
+Errors: `400 IMPORT_INVALID_URL` (not http/https/data, or not a valid link; data payloads over the body limit are refused too), `400 IMPORT_BLOCKED_DESTINATION` (the host name or its address is private, local, or otherwise not public — this guard can be lifted with `IMPORT_ALLOW_PRIVATE=1` on the server), `404 NOT_FOUND` (unknown, or not yours), `409 IMPORT_NOT_CANCELLABLE` (being saved), `409 IMPORT_ALREADY_DONE`, `429 IMPORT_BUSY` or `429 RATE_LIMITED` (too many running or too many starts), `409 IMPORT_CANCELLED`, `502 IMPORT_DNS_FAILED`, `502 IMPORT_UPSTREAM_ERROR`, `502 IMPORT_UPSTREAM_STATUS` (the host answered with an error status), `502 IMPORT_UNSUPPORTED_ENCODING`, `502 IMPORT_INTERRUPTED` (the download stopped early), `502 IMPORT_TOO_MANY_REDIRECTS`, `502 IMPORT_BAD_REDIRECT`, `504 IMPORT_TIMEOUT`, `413 FILE_TOO_LARGE`, `415 FILE_CONTENT_MISMATCH`. A failed import shows its error in `error`, not as an HTTP error on the GET.
 
 Both routes require a session and `X-Requested-With: fetch`, and the Origin check applies, the same as the other owner routes.
 

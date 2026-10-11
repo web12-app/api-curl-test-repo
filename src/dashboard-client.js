@@ -49,7 +49,8 @@ function dashboardClient() {
   function fmtSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
   }
 
   function fmtDate(iso) {
@@ -100,8 +101,12 @@ function dashboardClient() {
     return (err && err.message) || ('Request failed (' + result.status + ').');
   }
 
-  // Only the file count is shown. There is no storage total.
+  // Only the file count is shown. There is no storage total, and with no count limit only the count is shown.
   function renderQuota(q) {
+    if (!q || !isFinite(q.maxFiles)) {
+      quotaEl.textContent = (q ? q.count : 0) + ' files';
+      return;
+    }
     quotaEl.textContent = q.count + ' of ' + q.maxFiles + ' files';
   }
 
@@ -539,18 +544,51 @@ function dashboardClient() {
   }
 
   // ---- upload from URL. The server downloads the file. The link is kept only until the import starts.
+  //
+  // Imports run in the background on the server: the browser only polls. Active imports are remembered in
+  // localStorage, so a reload re-attaches to them instead of losing sight of a running download.
+
+  var IMPORTS_KEY = 'fv-active-imports';
+
+  function readStoredImports() {
+    try {
+      var raw = window.localStorage.getItem(IMPORTS_KEY);
+      var list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list : [];
+    } catch (e) { return []; }
+  }
+
+  function writeStoredImports(list) {
+    try {
+      if (list.length) window.localStorage.setItem(IMPORTS_KEY, JSON.stringify(list));
+      else window.localStorage.removeItem(IMPORTS_KEY);
+    } catch (e) { /* storage may be off: imports still work, they just do not survive a reload */ }
+  }
+
+  function rememberImport(entry) {
+    var list = readStoredImports().filter(function (item) { return item.id !== entry.id; });
+    list.push(entry);
+    writeStoredImports(list);
+  }
+
+  function forgetImport(id) {
+    writeStoredImports(readStoredImports().filter(function (item) { return item.id !== id; }));
+  }
 
   function importRow(host) {
     return queueRow(importList, 'Import from ' + host, '');
   }
 
-  // Polls one import until it finishes. Returns when it reaches a final state.
-  function pollImport(uploadId, row, host, onCancelState) {
+  // Polls one import until it finishes. Returns when it reaches a final state. With opts.reattached, a 404
+  // (the job is gone, e.g. after a server restart) is reported as such instead of a plain failure.
+  function pollImport(uploadId, row, host, onCancelState, opts) {
     var timer = null;
     var finishedState = false;
+    var reattached = !!(opts && opts.reattached);
     function stop() {
       finishedState = true;
       if (timer) clearTimeout(timer);
+      if (opts && opts.onDone) opts.onDone();
     }
     async function tick() {
       if (finishedState) return;
@@ -559,6 +597,11 @@ function dashboardClient() {
       if (!res.ok && res.status === 0) {
         // Network blip: the import itself is unaffected, so try again shortly.
         timer = setTimeout(tick, 2000);
+        return;
+      }
+      if (!res.ok && reattached && res.status === 404) {
+        stop();
+        row.fail('This import is no longer running (the server was restarted). Retry to start it again.', onCancelState.retry);
         return;
       }
       if (!res.ok) {
@@ -614,6 +657,7 @@ function dashboardClient() {
   }
 
   // Starts an import. A retry sends the same upload id, so a file that was already stored is not stored twice.
+  // The import runs in the background on the server; this page only watches it.
   function startImport(url) {
     var host = '';
     try { host = new URL(url).hostname; } catch (e) { host = 'link'; }
@@ -634,9 +678,28 @@ function dashboardClient() {
         notify('error', 'Import failed: ' + messageOf(res), res.status === 401);
         return;
       }
-      pollImport(uploadId, row, host, callbacks);
+      // Remembered only after the server accepted the job, so a reload re-attaches to real imports.
+      rememberImport({ id: uploadId, host: host, url: url });
+      pollImport(uploadId, row, host, callbacks, { onDone: function () { forgetImport(uploadId); } });
     }
     begin();
+  }
+
+  // Re-attaches to imports that were started before the last reload. The server kept working on them; the
+  // rows here just resume watching. A job the server no longer knows is reported and offered for retry.
+  function restoreImports() {
+    readStoredImports().forEach(function (entry) {
+      if (!entry || !entry.id) return;
+      var row = importRow(entry.host || 'link');
+      row.indeterminate();
+      row.state('Reconnecting…', '');
+      pollImport(entry.id, row, entry.host || 'link', {
+        retry: function () { startImport(entry.url); },
+      }, {
+        reattached: true,
+        onDone: function () { forgetImport(entry.id); },
+      });
+    });
   }
 
   // ---- files, links, and wiring
@@ -769,6 +832,7 @@ function dashboardClient() {
 
   loadFiles();
   loadLinks();
+  restoreImports();
 }
 
 module.exports = { dashboardClient };

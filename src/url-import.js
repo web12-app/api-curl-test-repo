@@ -1,11 +1,14 @@
 'use strict';
 
-// Downloads one file from a public https:// address to a temp file. It is the only place that talks to remote
-// hosts for imports. Each hop is validated before connecting: name, DNS answer, and the connection pinned to the
-// checked address. The download is limited while it streams, whatever Content-Length says.
+// Downloads one file from an http:// or https:// address (any port, IP address, or basic-auth user) or decodes a
+// data: link to a temp file. It is the only place that talks to remote hosts for imports. Each http(s) hop is
+// validated before connecting: name, DNS answer, and the connection pinned to the checked address. The download
+// is limited while it streams, whatever Content-Length says.
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const http = require('node:http');
 const https = require('node:https');
+const net = require('node:net');
 const path = require('node:path');
 const { AppError } = require('./errors');
 const { validateImportUrl, resolvePublicAddresses, pinnedLookup } = require('./net-guard');
@@ -16,7 +19,7 @@ const DEFAULT_TIMEOUTS = {
   maxRedirects: 3,
   connectTimeoutMs: 10 * 1000, // until the response headers arrive
   idleTimeoutMs: 30 * 1000, // longest silence while the body streams
-  totalTimeoutMs: 120 * 1000, // whole import, all hops included
+  totalTimeoutMs: 30 * 60 * 1000, // whole import, all hops included; big files download for a while
 };
 const HEADERS = {
   // Only these headers leave the server. Client headers and cookies are never forwarded.
@@ -28,19 +31,63 @@ const HEADERS = {
 
 const fail = (status, code, message) => new AppError(status, code, message);
 
+// User name and password from the link become one Basic auth header for that host only. They are decoded from
+// their percent-encoded form first. Nothing else from the link (or the importing user) is forwarded.
+const safeDecode = (value) => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+const authFor = (url) =>
+  url.username || url.password ? `${safeDecode(url.username)}:${safeDecode(url.password)}` : undefined;
+
+// Plain HTTP transport for http:// links. The connection still goes to the pinned address only.
+function httpTransport(url, { addresses, connectTimeoutMs, signal, auth }) {
+  return new Promise((resolve, reject) => {
+    const onConnectTimeout = () => req.destroy(new Error('connect timeout'));
+    const req = http.request(
+      {
+        method: 'GET',
+        host: url.hostname.replace(/^\[|\]$/g, ''),
+        port: url.port || 80,
+        path: `${url.pathname}${url.search}`,
+        headers: HEADERS,
+        auth,
+        lookup: pinnedLookup(addresses),
+        agent: false,
+      },
+      (res) => {
+        req.removeListener('timeout', onConnectTimeout);
+        resolve(res);
+      },
+    );
+    req.setTimeout(connectTimeoutMs, onConnectTimeout);
+    req.on('error', reject);
+    if (signal) {
+      if (signal.aborted) req.destroy(new Error('aborted'));
+      else signal.addEventListener('abort', () => req.destroy(new Error('aborted')), { once: true });
+    }
+    req.end();
+  });
+}
+
 // Production transport: HTTPS to the pinned address. The name stays the TLS server name, so the certificate is
-// still checked against the host the user asked for.
-function httpsTransport(url, { addresses, connectTimeoutMs, signal }) {
+// still checked against the host the user asked for. An IP-literal https link keeps certificate checking, so it
+// only works when the certificate really names that address.
+function httpsTransport(url, { addresses, connectTimeoutMs, signal, auth }) {
   return new Promise((resolve, reject) => {
     const onConnectTimeout = () => req.destroy(new Error('connect timeout'));
     const req = https.request(
       {
         method: 'GET',
-        host: url.hostname,
-        port: 443,
-        servername: url.hostname,
+        host: url.hostname.replace(/^\[|\]$/g, ''),
+        port: url.port || 443,
+        servername: url.hostname.replace(/^\[|\]$/g, ''),
         path: `${url.pathname}${url.search}`,
         headers: HEADERS,
+        auth,
         lookup: pinnedLookup(addresses),
         agent: false,
       },
@@ -59,6 +106,12 @@ function httpsTransport(url, { addresses, connectTimeoutMs, signal }) {
     req.end();
   });
 }
+
+// Picks the transport for one hop: the injected one (tests) or the real one for the scheme.
+const transportFor = (injected) => (url, opts) => {
+  if (injected) return injected(url, opts);
+  return (url.protocol === 'http:' ? httpTransport : httpsTransport)(url, opts);
+};
 
 function declaredLength(headers) {
   const value = headers['content-length'];
@@ -102,12 +155,101 @@ async function writeAll(handle, chunk) {
   }
 }
 
-// Options: { tmpDir, maxBytes, lookup, transport, timeouts, signal, onProgress }.
+// Extensions for data: links. An unknown media type keeps its subtype as the extension, and a link with no media
+// type counts as plain text. The content is still checked against the type before storing, like any upload.
+const DATA_EXTENSIONS = {
+  'text/plain': 'txt',
+  'text/csv': 'csv',
+  'text/html': 'html',
+  'text/css': 'css',
+  'application/json': 'json',
+  'application/pdf': 'pdf',
+  'application/zip': 'zip',
+  'application/wasm': 'wasm',
+  'application/octet-stream': 'bin',
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'video/mp4': 'mp4',
+  'audio/mpeg': 'mp3',
+  'audio/wav': 'wav',
+  'audio/ogg': 'ogg',
+};
+
+function dataName(mediatype) {
+  if (!mediatype) return 'import.txt';
+  const known = DATA_EXTENSIONS[mediatype];
+  if (known) return `import.${known}`;
+  const subtype = mediatype.split('/')[1] || '';
+  return `import.${/^[a-z0-9]{1,8}$/.test(subtype) ? subtype : 'bin'}`;
+}
+
+// Decodes a data: link into bytes. Base64 payloads are decoded strictly; plain payloads are percent-decoded
+// byte by byte, so binary-safe input survives untouched.
+function percentDecodeBytes(text) {
+  const bytes = [];
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '%' && /^[0-9a-fA-F]{2}$/.test(text.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(text.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      const code = text.charCodeAt(i);
+      if (code > 0xff) throw fail(400, 'IMPORT_INVALID_URL', 'The data link contains characters it cannot carry.');
+      bytes.push(code);
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+function decodeDataUrl(url, maxBytes) {
+  const comma = url.href.indexOf(',');
+  let head = url.href.slice(5, comma); // after "data:"
+  const payload = url.href.slice(comma + 1);
+  const isBase64 = /;base64$/i.test(head);
+  if (isBase64) head = head.slice(0, -7);
+  const mediatype = head.trim().toLowerCase();
+  let bytes;
+  if (isBase64) {
+    if (!/^[A-Za-z0-9+/=\s]*$/.test(payload)) {
+      throw fail(400, 'IMPORT_INVALID_URL', 'The data link is not valid base64.');
+    }
+    bytes = Buffer.from(payload.replace(/\s+/g, ''), 'base64');
+  } else {
+    bytes = percentDecodeBytes(payload);
+  }
+  if (bytes.length > maxBytes) {
+    throw fail(413, 'FILE_TOO_LARGE', `Files must be ${Math.floor(maxBytes / 1024 / 1024)} MB or smaller.`);
+  }
+  return { bytes, mediatype };
+}
+
+// Writes decoded data: bytes to a temp file with the same naming and cleanup rules as a download.
+async function dataToFile(url, { maxBytes, tmpDir, signal }) {
+  if (signal && signal.aborted) throw fail(409, 'IMPORT_CANCELLED', 'The import was cancelled.');
+  const { bytes, mediatype } = decodeDataUrl(url, maxBytes);
+  const dir = path.join(tmpDir, 'imports');
+  await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+  const partPath = path.join(dir, `${crypto.randomBytes(16).toString('hex')}.part`);
+  const handle = await fs.promises.open(partPath, 'wx', 0o600);
+  try {
+    await writeAll(handle, bytes);
+    await handle.close();
+  } catch (err) {
+    await handle.close().catch(() => {});
+    await fs.promises.rm(partPath, { force: true }).catch(() => {});
+    throw err;
+  }
+  return { path: partPath, size: bytes.length, suggestedName: dataName(mediatype), finalUrl: url };
+}
+
+// Options: { tmpDir, maxBytes, lookup, transport, timeouts, signal, onProgress, allowPrivate }.
 // Resolves to { path, size, suggestedName, finalUrl } or throws AppError. The caller deletes `path`.
 async function downloadToFile(rawUrl, options) {
   const timeouts = { ...DEFAULT_TIMEOUTS, ...(options.timeouts || {}) };
-  const transport = options.transport || httpsTransport;
-  const { maxBytes, tmpDir, lookup, signal, onProgress } = options;
+  const transportForUrl = transportFor(options.transport);
+  const { maxBytes, tmpDir, lookup, signal, onProgress, allowPrivate } = options;
 
   // One controller for the whole import. Its reason says why it stopped: 'timeout' or 'cancelled'.
   const local = new AbortController();
@@ -132,17 +274,23 @@ async function downloadToFile(rawUrl, options) {
 
   try {
     throwIfStopped();
-    let url = validateImportUrl(rawUrl);
+    let url = validateImportUrl(rawUrl, { allowPrivate });
+    if (url.protocol === 'data:') return await dataToFile(url, { maxBytes, tmpDir, signal: local.signal });
     let hop = 0;
     for (;;) {
-      const addresses = await resolvePublicAddresses(url.hostname, lookup);
+      // An IP-literal host needs no DNS: its single address was already checked by the guard.
+      const bareHost = url.hostname.replace(/^\[|\]$/g, '');
+      const addresses = net.isIP(bareHost)
+        ? [bareHost]
+        : await resolvePublicAddresses(url.hostname, lookup, { allowPrivate });
       throwIfStopped();
       let res;
       try {
-        res = await transport(url, {
+        res = await transportForUrl(url, {
           addresses,
           connectTimeoutMs: timeouts.connectTimeoutMs,
           signal: local.signal,
+          auth: authFor(url),
         });
       } catch (err) {
         throwIfStopped();
@@ -164,8 +312,8 @@ async function downloadToFile(rawUrl, options) {
           next = null;
         }
         if (!next) throw fail(502, 'IMPORT_BAD_REDIRECT', 'The link redirects to an address that cannot be used.');
-        // Every hop goes through the same checks as the first one: scheme, port, name, DNS, and addresses.
-        url = validateImportUrl(next.href);
+        // Every hop goes through the same checks as the first one: scheme, name or address, and DNS.
+        url = validateImportUrl(next.href, { allowPrivate });
         continue;
       }
       if (res.statusCode !== 200) {
@@ -233,4 +381,4 @@ async function downloadToFile(rawUrl, options) {
   }
 }
 
-module.exports = { downloadToFile, httpsTransport, DEFAULT_TIMEOUTS, suggestedName };
+module.exports = { downloadToFile, httpTransport, httpsTransport, DEFAULT_TIMEOUTS, suggestedName, dataName };
