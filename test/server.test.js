@@ -53,7 +53,8 @@ test('responses set security headers', async () => {
   const res = await fetch(`${shared.base}/api/health`);
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(res.headers.get('x-frame-options'), 'DENY');
-  assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+  // "same-origin", not "no-referrer" (see login-form-origin.test.js for why).
+  assert.equal(res.headers.get('referrer-policy'), 'same-origin');
 });
 
 test('login and signup pages render forms that post to the same paths', async () => {
