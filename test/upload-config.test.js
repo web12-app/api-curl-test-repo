@@ -6,7 +6,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { loadUploadSettings, loadFileConfig } = require('../src/config');
 const { buildAuth } = require('../src/server');
-const { dashboardPage } = require('../src/pages');
+const { explorePage } = require('../src/pages');
 const { ENV } = require('./files-fixture');
 
 const MIN = 256 * 1024;
@@ -114,15 +114,15 @@ test('buildAuth without login settings gives the disabled shape, with no service
   assert.ok(Array.isArray(auth.files.missing));
 });
 
-test('the dashboard shows the file-storage notice and no upload controls when storage is off', () => {
-  const html = dashboardPage({ username: 'ann' }, { filesEnabled: false });
+test('the explore page shows the file-storage notice and no upload controls when storage is off', () => {
+  const html = explorePage({ username: 'ann' }, { filesEnabled: false });
   assert.match(html, /File storage is not set up/);
   assert.ok(!html.includes('id="url-form"'), 'no URL import form');
   assert.ok(!html.includes('id="drop"'), 'no drop zone');
 });
 
-test('the dashboard shows the URL import form next to the drop zone when storage is on', () => {
-  const html = dashboardPage({ username: 'ann' }, { filesEnabled: true, maxBytes: 25 * 1024 * 1024 });
+test('the explore page shows the URL import form next to the drop zone when storage is on', () => {
+  const html = explorePage({ username: 'ann' }, { filesEnabled: true, maxBytes: 25 * 1024 * 1024 });
   const drop = html.indexOf('id="drop"');
   const form = html.indexOf('id="url-form"');
   assert.ok(drop > 0 && form > drop, 'the form follows the drop zone');

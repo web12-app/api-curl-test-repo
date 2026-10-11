@@ -14,7 +14,7 @@ cp .env.example .env        # then fill in the values (names only in the example
 node --env-file=.env src/server.js
 ```
 
-Open <http://localhost:3000>. Sign up, then drag a file onto the dashboard.
+Open <http://localhost:3000>. The welcome page explains the app with a 3D intro; sign up and you land on your app home page with live stats. Files, uploads, and upload links live under **Explore**. Signed-in users never see the welcome page again until they log out.
 
 Without configuration the home page and `/api/health` still work. Login and files report which settings are missing, by name.
 
