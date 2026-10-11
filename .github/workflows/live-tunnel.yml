@@ -1,11 +1,20 @@
-# Run the app on a GitHub runner and expose it through the ngrok domain.
+# Run the app on a GitHub runner, expose it through the ngrok domain, and keep it live automatically.
 #
-# Start it from the Actions tab (Run workflow). When a run reaches its time limit and shuts down cleanly,
-# it requests one follow-up run of this workflow on main, with the same duration and one fewer automatic restart.
-# The chain stops when auto_restarts reaches 0, when a run fails (tests, configuration, app, or tunnel), or when a
-# dispatch fails. Each follow-up waits in the live-tunnel queue until the previous run has stopped its tunnel.
+# How the service stays up without anyone pressing a button:
+# - Clean expiry relay: when a run reaches its time limit it stops cleanly (releasing the tunnel) and requests one
+#   follow-up run with the same duration and the same restart budget, so the chain never runs out on its own.
+# - Crash self-heal: if a run fails after at least 15 minutes of uptime, one follow-up run is requested with one
+#   fewer automatic restart. Failures inside the first 15 minutes do NOT self-heal (a broken configuration would
+#   otherwise restart in a loop); the schedule below covers them.
+# - Schedule backbone: every 5 hours a scheduled run re-seeds the service, so the site also recovers even if a
+#   dispatch is ever lost.
+# - Redeploy on edit: every push to main restarts the live site with the latest code (after the tests pass first).
+# - The concurrency group cancels the previous session when a new run arrives, so an edit to main goes live within
+#   a few minutes and only one session can ever hold the ngrok domain. Each takeover has a short (~2-4 min)
+#   downtime while the new run boots. The public URL never changes: every run reuses the static ngrok domain.
 #
-# Only one ngrok agent can hold the domain at a time. Stop any other tunnel on the domain first, or this run fails.
+# Only one ngrok agent can hold the domain at a time. The tunnel start below retries briefly in case a cancelled
+# predecessor is still releasing it.
 #
 # Secrets (Settings > Secrets and variables > Actions > Secrets):
 #   NGROK_AUTHTOKEN     ngrok auth token
@@ -20,21 +29,30 @@ on:
   workflow_dispatch:
     inputs:
       minutes:
-        description: "How long to keep the tunnel open (1-300)"
+        description: "How long to keep the tunnel open per run (1-300)"
         required: true
-        default: "60"
+        default: "300"
       auto_restarts:
-        description: "How many follow-up runs to request automatically when a run reaches its time limit (0-100)"
+        description: "Follow-up budget used by crash self-heal (0-100); clean relays do not consume it"
         required: true
         default: "24"
+  push:
+    branches:
+      - main
+  schedule:
+    # Backbone: re-seed the service every 5 hours even if the chain ever dies.
+    # Scheduled and push runs use the default inputs above (300-minute sessions).
+    - cron: "37 */5 * * *"
 
 permissions:
   contents: read
 
-# One run at a time. A follow-up run waits here until the current run has released the tunnel.
+# One session at a time. A new run (push, schedule, or manual) cancels the previous session and takes over, so
+# edits to main go live within a few minutes. The relay only dispatches a follow-up after the previous tunnel is
+# released, and the duplicate guard in the next job keeps runs from stacking up.
 concurrency:
   group: live-tunnel
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   NGROK_DOMAIN: precision-pledge-fled.ngrok-free.dev
@@ -57,6 +75,8 @@ jobs:
     outputs:
       # "true" only when the run reached its time limit with the app and tunnel healthy and shut down cleanly.
       expired: ${{ steps.keep.outputs.expired }}
+      # Seconds this job was alive (best effort). Used to decide whether a failed run may self-heal.
+      elapsed: ${{ steps.wrap.outputs.elapsed }}
     steps:
       - name: Check inputs and secrets
         env:
@@ -67,6 +87,7 @@ jobs:
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
         run: |
           set -uo pipefail
+          date +%s > job_start
           failed=0
           if ! [[ "$MINUTES" =~ ^[0-9]+$ ]] || [ "$MINUTES" -lt 1 ] || [ "$MINUTES" -gt 300 ]; then
             echo "::error::minutes must be a whole number from 1 to 300."
@@ -143,23 +164,32 @@ jobs:
         run: |
           set -uo pipefail
           ngrok config add-authtoken "$NGROK_AUTHTOKEN" > /dev/null
-          nohup ngrok http "$APP_PORT" --url="https://$NGROK_DOMAIN" --log=stdout > ngrok.log 2>&1 &
-          echo $! > ngrok.pid
-          code=000
-          for attempt in $(seq 1 30); do
-            if ! kill -0 "$(cat ngrok.pid)" 2>/dev/null; then
-              echo "::error::The ngrok process exited. Another agent may still hold $NGROK_DOMAIN."
-              exit 1
-            fi
-            # The public health check is the readiness gate: the service counts as live only when it passes.
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'ngrok-skip-browser-warning: 1' "https://$NGROK_DOMAIN/api/health") || code=000
-            if [ "$code" = "200" ]; then
-              echo "Tunnel is live and the public health check passed (attempt $attempt)."
-              exit 0
-            fi
-            sleep 3
+          # A cancelled predecessor may still be releasing the domain for a few seconds. Retry instead of failing
+          # immediately when the domain is briefly held or the public check is slow to pass.
+          for round in $(seq 1 8); do
+            nohup ngrok http "$APP_PORT" --url="https://$NGROK_DOMAIN" --log=stdout > ngrok.log 2>&1 &
+            echo $! > ngrok.pid
+            code=000
+            healthy=0
+            for attempt in $(seq 1 20); do
+              if ! kill -0 "$(cat ngrok.pid)" 2>/dev/null; then
+                echo "ngrok exited (round $round, attempt $attempt, last HTTP status: $code)."
+                break
+              fi
+              # The public health check is the readiness gate: the service counts as live only when it passes.
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'ngrok-skip-browser-warning: 1' "https://$NGROK_DOMAIN/api/health") || code=000
+              if [ "$code" = "200" ]; then
+                echo "Tunnel is live and the public health check passed (round $round, attempt $attempt)."
+                healthy=1
+                break
+              fi
+              sleep 3
+            done
+            [ "$healthy" = "1" ] && exit 0
+            kill -KILL "$(cat ngrok.pid)" 2>/dev/null || true
+            [ "$round" -lt 8 ] && sleep 15
           done
-          echo "::error::The public health check did not pass (last HTTP status: $code). Check that no other tunnel is using $NGROK_DOMAIN."
+          echo "::error::Could not start the tunnel on $NGROK_DOMAIN after 8 rounds (last public HTTP status: $code). Check that no other tunnel is using the domain."
           exit 1
 
       - name: Keep running
@@ -222,6 +252,13 @@ jobs:
           stop_pid app.pid "app"
           true
 
+      - name: Measure run duration
+        id: wrap
+        if: always()
+        run: |
+          start=$(cat job_start 2>/dev/null || date +%s)
+          echo "elapsed=$(( $(date +%s) - start ))" >> "$GITHUB_OUTPUT"
+
       - name: Diagnostics (redacted)
         if: failure()
         env:
@@ -251,6 +288,7 @@ jobs:
           KEEP_OUTCOME: ${{ steps.keep.outcome }}
           REQUESTED_MINUTES: ${{ inputs.minutes }}
           REQUESTED_RESTARTS: ${{ inputs.auto_restarts }}
+          EVENT: ${{ github.event_name }}
         run: |
           {
             echo "## Live app on ngrok: this run"
@@ -258,8 +296,9 @@ jobs:
             echo "| Item | Value |"
             echo "| --- | --- |"
             echo "| Public URL | https://${NGROK_DOMAIN} |"
+            echo "| Trigger | ${EVENT} |"
             echo "| Minutes | ${REQUESTED_MINUTES} |"
-            echo "| Automatic restarts left (requested) | ${REQUESTED_RESTARTS} |"
+            echo "| Self-heal restarts left (requested) | ${REQUESTED_RESTARTS} |"
             echo "| Run ended | ${KEEP_OUTCOME:-not reached} |"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
@@ -267,9 +306,10 @@ jobs:
   next:
     name: Request next run
     # Runs only after the live job has finished, so the tunnel is already released.
-    # Skipped when the live job failed or was cancelled.
+    # Relay: after a clean expiry. Self-heal: after a failure, once the session ran for at least 15 minutes.
+    # Skipped when the live job was cancelled (a newer run already took over the domain).
     needs: live
-    if: needs.live.outputs.expired == 'true'
+    if: needs.live.outputs.expired == 'true' || (needs.live.result == 'failure' && fromJSON(needs.live.outputs.elapsed || '"0"') >= 900)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -281,6 +321,8 @@ jobs:
       CURRENT_RUN_ID: ${{ github.run_id }}
       MINUTES: ${{ inputs.minutes }}
       AUTO_RESTARTS: ${{ inputs.auto_restarts }}
+      ELAPSED: ${{ needs.live.outputs.elapsed }}
+      LIVE_RESULT: ${{ needs.live.result }}
     steps:
       - name: Request the next run
         run: |
@@ -294,11 +336,22 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           }
 
-          if [ "$AUTO_RESTARTS" -lt 1 ]; then
-            summary "**Not requested.** The automatic restart limit is used up. Start the workflow manually to continue."
-            exit 0
+          if [ "$LIVE_RESULT" != "success" ]; then
+            # Self-heal path: the live job failed (not expired, not cancelled).
+            if [ "${ELAPSED:-0}" -lt 900 ]; then
+              summary "**Not requested.** The run failed after only ${ELAPSED:-0} s (under 15 minutes). Self-heal is skipped for early failures so a broken configuration cannot restart in a loop. The 5-hour schedule will retry."
+              exit 0
+            fi
+            if [ "$AUTO_RESTARTS" -lt 1 ]; then
+              summary "**Not requested.** The crash self-heal budget (auto_restarts) is used up. The 5-hour schedule will retry."
+              exit 0
+            fi
+            echo "Self-heal: the run failed after ${ELAPSED:-0} s. Requesting one follow-up with one fewer restart."
+            next_restarts=$((AUTO_RESTARTS - 1))
+          else
+            # Relay path: clean expiry. The relay does not consume the self-heal budget, so the chain is endless.
+            next_restarts="$AUTO_RESTARTS"
           fi
-          next_restarts=$((AUTO_RESTARTS - 1))
 
           # Duplicate guard: if another run is already queued or running, do not add another.
           gh run list --repo "$REPO" --workflow "$WORKFLOW_FILE" --branch main --limit 50 \
@@ -332,7 +385,7 @@ jobs:
             [ -n "$new_run" ] && break
           done
           if [ -n "$new_run" ]; then
-            summary "**Requested.** Next run: $new_run. It starts after this run releases the tunnel, with $MINUTES minutes and $next_restarts automatic restarts left."
+            summary "**Requested.** Next run: $new_run. It starts after this run releases the tunnel, with $MINUTES minutes and $next_restarts self-heal restarts left."
           else
             echo "::warning::The dispatch was accepted, but the new run was not visible within 60 seconds."
             summary "**Dispatch accepted, but not confirmed.** The new run was not visible within 60 seconds. Check the Actions tab before relying on the chain."
