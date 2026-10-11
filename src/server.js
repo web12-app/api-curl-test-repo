@@ -51,7 +51,9 @@ function send(res, status, headers, body) {
   res.writeHead(status, {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
-    'Referrer-Policy': 'no-referrer',
+    // Not "no-referrer": Chromium sends "Origin: null" on form posts under that policy, and the origin
+    // check refuses "null". "same-origin" keeps the Origin of same-site posts and sends no referrer cross-site.
+    'Referrer-Policy': 'same-origin',
     'Cache-Control': 'no-store',
     ...headers,
   });
