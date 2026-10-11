@@ -868,7 +868,7 @@ test('logs show a masked name and short references, never the full name or sessi
 // ---- settings
 
 test('upload settings: defaults stay, valid values apply, and bad values name the setting', () => {
-  assert.deepEqual(loadUploadSettings({}), { ok: true, limits: { chunks: {} }, tempDir: null });
+  assert.deepEqual(loadUploadSettings({}), { ok: true, limits: { chunks: {}, importAllowPrivate: false }, tempDir: null });
   const good = loadUploadSettings({ UPLOAD_CHUNK_BYTES: '524288', UPLOAD_SESSION_HOURS: '6', FILE_TEMP_DIR: '/var/tmp/files' });
   assert.equal(good.ok, true);
   assert.equal(good.limits.chunks.chunkBytes, 524288);

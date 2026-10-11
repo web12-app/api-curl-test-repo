@@ -115,7 +115,7 @@ Retrying a piece is safe. Sending the same piece again with the same bytes retur
 
 ### Upload from URL
 
-The server downloads a file from a public `https://` link. It works in the background, and the client polls it. Only the owner of an import can see or cancel it. The link itself is kept only in memory for the life of the import, and only its host is returned.
+The server downloads a file from an `http://` or `https://` link of any shape: any port, an IP address instead of a name, or a `user:password@` link for servers that need basic auth. A `data:` link is also accepted — its bytes are decoded directly, so no network is used (it must still fit the API body limit of 16 KB). It works in the background, and the client polls it. Only the owner of an import can see or cancel it. The link itself is kept only in memory for the life of the import, and only its host is returned.
 
 | Method and path | Body | Result |
 | --- | --- | --- |
@@ -125,7 +125,7 @@ The server downloads a file from a public `https://` link. It works in the backg
 
 The job view has `uploadId`, `host`, `state`, `name`, `size`, `downloaded` (bytes so far), `error` (`code` and `message`), `file` (once stored), and `updatedAt`. States: `queued`, `downloading`, `checking`, `storing`, `completed`, `failed`, `cancelled`.
 
-Errors: `400 IMPORT_INVALID_URL` (not https, has a user name or password, is too long, or is not a valid link), `400 IMPORT_BLOCKED_DESTINATION` (the host name or its address is private, local, or otherwise not public), `404 NOT_FOUND` (unknown, or not yours), `409 IMPORT_NOT_CANCELLABLE` (being saved), `409 IMPORT_ALREADY_DONE`, `429 IMPORT_BUSY` or `429 RATE_LIMITED` (too many running or too many starts), `409 IMPORT_CANCELLED`, `502 IMPORT_DNS_FAILED`, `502 IMPORT_UPSTREAM_ERROR`, `502 IMPORT_UPSTREAM_STATUS` (the host answered with an error status), `502 IMPORT_UNSUPPORTED_ENCODING`, `502 IMPORT_INTERRUPTED` (the download stopped early), `502 IMPORT_TOO_MANY_REDIRECTS`, `502 IMPORT_BAD_REDIRECT`, `504 IMPORT_TIMEOUT`, `413 FILE_TOO_LARGE`, `415 FILE_CONTENT_MISMATCH`. A failed import shows its error in `error`, not as an HTTP error on the GET.
+Errors: `400 IMPORT_INVALID_URL` (not http/https/data, or not a valid link; data payloads over the body limit are refused too), `400 IMPORT_BLOCKED_DESTINATION` (the host name or its address is private, local, or otherwise not public — this guard can be lifted with `IMPORT_ALLOW_PRIVATE=1` on the server), `404 NOT_FOUND` (unknown, or not yours), `409 IMPORT_NOT_CANCELLABLE` (being saved), `409 IMPORT_ALREADY_DONE`, `429 IMPORT_BUSY` or `429 RATE_LIMITED` (too many running or too many starts), `409 IMPORT_CANCELLED`, `502 IMPORT_DNS_FAILED`, `502 IMPORT_UPSTREAM_ERROR`, `502 IMPORT_UPSTREAM_STATUS` (the host answered with an error status), `502 IMPORT_UNSUPPORTED_ENCODING`, `502 IMPORT_INTERRUPTED` (the download stopped early), `502 IMPORT_TOO_MANY_REDIRECTS`, `502 IMPORT_BAD_REDIRECT`, `504 IMPORT_TIMEOUT`, `413 FILE_TOO_LARGE`, `415 FILE_CONTENT_MISMATCH`. A failed import shows its error in `error`, not as an HTTP error on the GET.
 
 Both routes require a session and `X-Requested-With: fetch`, and the Origin check applies, the same as the other owner routes.
 

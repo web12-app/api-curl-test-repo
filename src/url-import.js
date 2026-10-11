@@ -107,8 +107,11 @@ function httpsTransport(url, { addresses, connectTimeoutMs, signal, auth }) {
   });
 }
 
-const transportFor = (injected) => (url) =>
-  injected || (url.protocol === 'http:' ? httpTransport : httpsTransport);
+// Picks the transport for one hop: the injected one (tests) or the real one for the scheme.
+const transportFor = (injected) => (url, opts) => {
+  if (injected) return injected(url, opts);
+  return (url.protocol === 'http:' ? httpTransport : httpsTransport)(url, opts);
+};
 
 function declaredLength(headers) {
   const value = headers['content-length'];

@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const { startFake, withApp, signup, authed, json, startOrigin, fakeDns, originTransport, waitForImport, startImport, tempFiles, storedAssets, listFiles, downloadFile, MB } = require('./files-fixture');
+const { downloadToFile, httpTransport } = require('../src/url-import');
 
 const GB = 1024 * MB;
 const PUBLIC_IP = '93.184.216.34';
@@ -31,7 +32,7 @@ const send = (res, status, headers, body) => {
 const ok200 = (res, body, headers = {}) => send(res, 200, { 'Content-Type': 'application/octet-stream', ...headers }, body);
 
 // Runs fn with an origin serving `routes` (path -> handler), a fake DNS table, and an app that uses both.
-async function withImports({ routes = {}, dns, timeouts, importLimits, lookup, limits } = {}, fn) {
+async function withImports({ routes = {}, dns, timeouts, importLimits, lookup, limits, allowPrivate } = {}, fn) {
   const origin = await startOrigin((req, res) => {
     const path = req.url.split('?')[0];
     const handler = routes[path];
@@ -42,7 +43,7 @@ async function withImports({ routes = {}, dns, timeouts, importLimits, lookup, l
   const dnsFake = lookup ? { lookup, lookups: [] } : fakeDns(table);
   const { transport, hops } = originTransport(origin.port);
   try {
-    await withApp(fake, { urlImport: { lookup: dnsFake.lookup, transport, timeouts }, importLimits, limits }, async (app) => {
+    await withApp(fake, { urlImport: { lookup: dnsFake.lookup, transport, timeouts, allowPrivate }, importLimits, limits }, async (app) => {
       await fn({ app, origin, hops, dns: dnsFake });
     });
   } finally {
@@ -93,6 +94,132 @@ test('an https link is imported in the background, stored once, and its bytes ma
       }
       assert.equal(seen['accept-encoding'], 'identity');
       assert.deepEqual(tempFiles(app.tmpDir).filter((f) => f.endsWith('.part')), [], 'no temp file is left');
+    },
+  );
+});
+
+test('a plain http link, a custom port, and an IP-literal link import exactly like https ones', async () => {
+  const body = Buffer.from('over plain http\n');
+  await withImports({ routes: { '/x.txt': (req, res) => ok200(res, body) } }, async ({ app, origin, dns }) => {
+    const user = await signup(app);
+    const links = [
+      `http://${HOST}/x.txt`, // plain http
+      `http://${HOST}:8080/x.txt`, // custom port
+      `https://${HOST}:8443/x.txt`, // custom port on https
+      `http://${PUBLIC_IP}/x.txt`, // IP address instead of a name
+    ];
+    for (const link of links) {
+      const started = await startImport(app, user.cookie, link);
+      assert.equal(started.status, 202, link);
+      const done = await waitForImport(app, user.cookie, started.uploadId);
+      assert.equal(done.state, 'completed', link);
+    }
+    assert.equal((await listFiles(app, user.cookie)).files.length, links.length);
+    assert.equal(origin.requests.length, links.length);
+    // The IP literal needed no DNS at all; the name-based links resolved once each.
+    assert.equal(dns.lookups.filter((n) => n === PUBLIC_IP).length, 0, 'an IP link is never looked up');
+  });
+});
+
+test('a data: link is decoded and stored with no network access at all', async () => {
+  await withImports({ routes: {} }, async ({ app, origin, dns }) => {
+    const user = await signup(app);
+    const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n'), crypto.randomBytes(300)]);
+    const base64 = await startImport(app, user.cookie, `data:application/pdf;base64,${pdf.toString('base64')}`);
+    const donePdf = await waitForImport(app, user.cookie, base64.uploadId);
+    assert.equal(donePdf.state, 'completed');
+    assert.equal(donePdf.name, 'import.pdf');
+    assert.equal(donePdf.size, pdf.length);
+    assert.equal(donePdf.host, 'data');
+
+    const text = await startImport(app, user.cookie, `https://${HOST}/x`); // filler so ids stay distinct
+    await waitForImport(app, user.cookie, text.uploadId);
+
+    const started = await startImport(app, user.cookie, 'data:text/plain,hello%20world');
+    const doneTxt = await waitForImport(app, user.cookie, started.uploadId);
+    assert.equal(doneTxt.state, 'completed');
+    assert.equal(doneTxt.name, 'import.txt');
+
+    // Both files round-trip byte for byte.
+    const files = (await listFiles(app, user.cookie)).files;
+    const storedPdf = files.find((f) => f.name === 'import.pdf');
+    const storedTxt = files.find((f) => f.name === 'import.txt');
+    assert.ok(storedPdf && storedTxt);
+    assert.ok((await downloadFile(app, user.cookie, storedPdf.id)).bytes.equals(pdf));
+    assert.equal((await downloadFile(app, user.cookie, storedTxt.id)).bytes.toString(), 'hello world');
+
+    // No origin connection and no DNS lookup happened for the data: links.
+    assert.equal(dns.lookups.filter((n) => !n.includes('example.test')).length, 0);
+    assert.deepEqual(tempFiles(app.tmpDir).filter((f) => f.endsWith('.part')), [], 'no temp file is left');
+  });
+});
+
+test('a data: link that is too big or broken is refused', async () => {
+  await withImports({ routes: {}, limits: { maxFileBytes: 1024 } }, async ({ app }) => {
+    const user = await signup(app);
+    // Decodes to 3 KB, over the 1024-byte limit: the job starts and fails with the size error.
+    const tooBig = await startImport(app, user.cookie, `data:text/plain;base64,${'A'.repeat(4096)}`);
+    assert.equal(tooBig.status, 202, 'the job starts in the background');
+    const bigJob = await waitForImport(app, user.cookie, tooBig.uploadId);
+    assert.equal(bigJob.state, 'failed');
+    assert.equal(bigJob.error.code, 'FILE_TOO_LARGE');
+    // A broken base64 payload fails in the job too.
+    const bad = await startImport(app, user.cookie, 'data:text/plain;base64,not!!base64!!');
+    assert.equal(bad.status, 202);
+    const badJob = await waitForImport(app, user.cookie, bad.uploadId);
+    assert.equal(badJob.state, 'failed');
+    assert.equal(badJob.error.code, 'IMPORT_INVALID_URL');
+  });
+});
+
+test('a user name and password in the link become a Basic auth header over the real transport', async () => {
+  await withApp(fake, {}, async (app) => {
+    const seen = [];
+    const origin = await startOrigin((req, res) => {
+      seen.push(req.headers.authorization);
+      res.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Disposition': 'attachment; filename="secret.txt"' });
+      res.end('protected bytes\n');
+    });
+    try {
+      const result = await downloadToFile(`http://user:p%40ss@127.0.0.1:${origin.port}/secret.txt`, {
+        tmpDir: app.tmpDir,
+        maxBytes: MB,
+        allowPrivate: true, // the local origin is a loopback address
+        transport: httpTransport,
+        timeouts: { connectTimeoutMs: 5000, idleTimeoutMs: 5000, totalTimeoutMs: 15000 },
+      });
+      assert.equal(result.size, 'protected bytes\n'.length);
+      assert.equal(result.suggestedName, 'secret.txt');
+      assert.deepEqual(seen, [`Basic ${Buffer.from('user:p@ss').toString('base64')}`], 'the decoded user and password are sent as one Basic header');
+    } finally {
+      await origin.close();
+    }
+  });
+});
+
+test('IMPORT_ALLOW_PRIVATE unlocks loopback, private ranges, and internal names for imports', async () => {
+  const body = Buffer.from('from the home network\n');
+  await withImports(
+    {
+      allowPrivate: true,
+      dns: { localhost: ['127.0.0.1'], 'nas.lan.test': ['192.168.1.50'], 'box.internal.test': ['10.0.0.9'] },
+      routes: { '/x.txt': (req, res) => ok200(res, body) },
+    },
+    async ({ app }) => {
+      const user = await signup(app);
+      const links = [
+        'http://localhost/x.txt',
+        'http://nas.lan.test/x.txt',
+        'http://box.internal.test/x.txt',
+        'http://192.168.1.1/x.txt',
+        'http://[fd00::5]/x.txt',
+      ];
+      for (const link of links) {
+        const started = await startImport(app, user.cookie, link);
+        const done = await waitForImport(app, user.cookie, started.uploadId);
+        assert.equal(done.state, 'completed', link);
+      }
+      assert.equal((await listFiles(app, user.cookie)).files.length, links.length);
     },
   );
 });
@@ -371,27 +498,46 @@ test('up to three redirects are followed; a fourth is refused', async () => {
   );
 });
 
-test('a redirect to plain http, to a private network, or to an address literal is refused without connecting', async () => {
+test('a redirect to plain http or a custom port is followed like any other hop', async () => {
+  const body = Buffer.from('after the hop\n');
   await withImports(
     {
       routes: {
+        '/x.txt': (req, res) => ok200(res, body),
         '/to-http': (req, res) => send(res, 302, { Location: `http://${HOST}/x.txt` }, ''),
+        '/to-port': (req, res) => send(res, 302, { Location: `https://${HOST}:8443/x.txt` }, ''),
+      },
+    },
+    async ({ app, origin, hops }) => {
+      const user = await signup(app);
+      for (const path of ['/to-http', '/to-port']) {
+        const job = await waitForImport(app, user.cookie, (await startImport(app, user.cookie, `https://${HOST}${path}`)).uploadId);
+        assert.equal(job.state, 'completed', path);
+      }
+      assert.equal((await listFiles(app, user.cookie)).files.length, 2, 'both imports stored their file');
+      assert.ok(hops.some((h) => h.host === HOST), 'the hops stayed on the same host');
+      assert.equal(origin.requests.length, 4, 'each import made two connections');
+    },
+  );
+});
+
+test('a redirect to a private network or localhost is refused without connecting', async () => {
+  await withImports(
+    {
+      routes: {
         '/to-intranet': (req, res) => send(res, 302, { Location: 'https://intranet.example.test/x.txt' }, ''),
         '/to-metadata': (req, res) => send(res, 302, { Location: 'https://169.254.169.254/latest/meta-data' }, ''),
         '/to-localhost': (req, res) => send(res, 302, { Location: 'https://localhost/admin' }, ''),
         '/no-location': (req, res) => send(res, 302, {}, ''),
-        '/to-port': (req, res) => send(res, 302, { Location: `https://${HOST}:8443/x` }, ''),
       },
     },
     async ({ app, origin, hops }) => {
       const user = await signup(app);
       const expect = {
-        '/to-http': 'IMPORT_INVALID_URL',
         '/to-intranet': 'IMPORT_BLOCKED_DESTINATION',
         '/to-metadata': 'IMPORT_BLOCKED_DESTINATION',
         '/to-localhost': 'IMPORT_BLOCKED_DESTINATION',
         '/no-location': 'IMPORT_BAD_REDIRECT',
-        '/to-port': 'IMPORT_INVALID_URL',
       };
       for (const [p, code] of Object.entries(expect)) {
         const before = origin.requests.length;
@@ -597,16 +743,17 @@ test('links that are not allowed are refused at once, with no connection and no 
   await withImports({ routes: {} }, async ({ app, origin, dns }) => {
     const user = await signup(app);
     const refused = {
-      'http://files.example.test/x.pdf': 'IMPORT_INVALID_URL',
-      'https://user:pw@files.example.test/x.pdf': 'IMPORT_INVALID_URL',
-      'https://files.example.test:8443/x.pdf': 'IMPORT_INVALID_URL',
       'https://localhost/x.pdf': 'IMPORT_BLOCKED_DESTINATION',
       'https://127.0.0.1/x.pdf': 'IMPORT_BLOCKED_DESTINATION',
       'https://[::1]/x.pdf': 'IMPORT_BLOCKED_DESTINATION',
       'https://192.168.1.1/x.pdf': 'IMPORT_BLOCKED_DESTINATION',
       'https://metadata.google.internal/x': 'IMPORT_BLOCKED_DESTINATION',
       'ftp://files.example.test/x.pdf': 'IMPORT_INVALID_URL',
+      'file:///etc/passwd': 'IMPORT_INVALID_URL',
+      'javascript:alert(1)': 'IMPORT_INVALID_URL',
+      'data:no-comma-here': 'IMPORT_INVALID_URL',
     };
+    refused[`https://files.example.test/${'x'.repeat(2100)}.pdf`] = 'IMPORT_INVALID_URL';
     for (const [url, code] of Object.entries(refused)) {
       const res = await startImport(app, user.cookie, url);
       assert.equal(res.status, 400, url);

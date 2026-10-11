@@ -122,13 +122,20 @@ function validateImportUrl(raw, { allowPrivate = false } = {}) {
   if (typeof raw !== 'string' || raw.length === 0) {
     throw new AppError(400, 'IMPORT_INVALID_URL', 'Enter a direct http:// or https:// link to a file.');
   }
-  if (/[\u0000-\u0020\u007f]/.test(raw)) {
-    throw new AppError(400, 'IMPORT_INVALID_URL', 'The link contains spaces or control characters.');
+  // Control characters are refused everywhere: they can never be part of a link. A space is refused for network
+  // links (it would have to be encoded), but a data: link carries its payload, so spaces inside it are fine and
+  // are percent-encoded by the URL parser.
+  if (/[\u0000-\u001f\u007f]/.test(raw)) {
+    throw new AppError(400, 'IMPORT_INVALID_URL', 'The link contains control characters.');
   }
   // A data: link carries the file inside itself, so it can be longer than a network link. Its decoded size is
   // checked against the same file limit in the downloader.
-  if (raw.length > MAX_URL_CHARS && !raw.startsWith('data:')) {
+  const isData = raw.startsWith('data:');
+  if (!isData && raw.length > MAX_URL_CHARS) {
     throw new AppError(400, 'IMPORT_INVALID_URL', 'Enter a direct http:// or https:// link to a file.');
+  }
+  if (!isData && /[\u0020]/.test(raw)) {
+    throw new AppError(400, 'IMPORT_INVALID_URL', 'The link contains spaces or control characters.');
   }
   let url;
   try {

@@ -39,6 +39,7 @@ These three variables tune the piece-by-piece upload and the temp directory. Lea
 | `UPLOAD_CHUNK_BYTES` | 8 MiB | Whole number from 256 KiB (262144) to 8 MiB (8388608) | Size of each piece. The browser uses the size the server returns when a session opens. |
 | `UPLOAD_SESSION_HOURS` | 24 | From 1 to 168 | How long an unfinished upload may live. Idle sessions are dropped after 2 hours with no new piece. |
 | `FILE_TEMP_DIR` | OS temp directory | An absolute path | Where pieces and in-progress files are kept. Use a persistent disk if uploads should survive a restart. It is never served over HTTP. |
+| `IMPORT_ALLOW_PRIVATE` | off | `1` / `true` / `yes` / `on` turn it on | Lets URL imports reach loopback, private ranges, and internal names (an internal file server, for example). Without it, imports reach only public internet addresses, and a refused link's error says this setting exists. |
 
 The per-file ceiling is **2 GB**, GitHub's own limit for one release asset. It is a code default in `src/files.js` (`DEFAULT_LIMITS`), not an environment setting, and it exists because GitHub refuses larger assets. A change to it needs a separate, reviewed change to the code default.
 

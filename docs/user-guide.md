@@ -32,11 +32,11 @@ Shows how many files you have, for example `5 files`. There is no storage total 
 
 ### 2a. Upload from URL
 
-- Paste a direct link to a file into **Upload from URL**, then press **Import**. The link must start with `https://` and point to a public host. The download runs in the background: you can keep using the app, close the tab, or reload the page — the import keeps going, and the page re-attaches to it when you come back. The ceiling is the same 2 GB per file.
+- Paste a direct link to a file into **Upload from URL**, then press **Import**. Every link shape works: `http://` or `https://` on any port, an IP address instead of a name, a `user:password@host/link` address for servers that need a sign-in, or a `data:` link whose bytes travel inside the link itself. The download runs in the background: you can keep using the app, close the tab, or reload the page — the import keeps going, and the page re-attaches to it when you come back. The ceiling is the same 2 GB per file. Addresses on the server's own network (loopback, private ranges, internal names) are refused unless the server sets `IMPORT_ALLOW_PRIVATE=1`.
 - The server downloads the file in the background. The queue shows the state: waiting, downloading, saving, imported, or failed.
 - **Cancel** works while the import is waiting or downloading. A failed import keeps its **Retry** link.
 - The link is cleared from the box when you press Import, and the server does not keep it after the import finishes. Only the host name is shown.
-- Links that redirect are followed, up to three times, and each new address must also be public. Links to private or local addresses, and links with a user name or password, are refused.
+- Links that redirect are followed, up to three times, and each new address must also be public. Links to private or local addresses are refused unless the server sets `IMPORT_ALLOW_PRIVATE=1`.
 
 ### 3. Files
 

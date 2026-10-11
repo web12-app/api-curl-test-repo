@@ -39,6 +39,9 @@ concurrency:
 env:
   NGROK_DOMAIN: precision-pledge-fled.ngrok-free.dev
   PRIVATE_DATA_REPO: web12-app/api-curl-private-data
+  # URL imports accept every link shape. This lifts the private-network guard, so links to the
+  # runner's own loopback and internal addresses also import. Remove it to restore the guard.
+  IMPORT_ALLOW_PRIVATE: "1"
   # Browser origins allowed to call /api/. Exact origin, no path, no wildcard.
   CORS_ALLOWED_ORIGINS: https://precision-pledge-fled.ngrok-free.dev
   # ngrok agent download, pinned by SHA-256. A new ngrok release changes the hash and fails the run until this is updated.
