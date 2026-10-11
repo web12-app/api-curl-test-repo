@@ -163,6 +163,56 @@ const APP_NAV_CSS = `
       ul.facts { padding-left: 1.2rem; color: #57606a; }
       ul.facts li { margin: .3rem 0; }`;
 
+// Dark, YouTube-like styling for the Tube pages (feed, watch screen, channel). The React components
+// use these classes plus small inline styles. Plain CSS only, so the app-shell CSP still holds.
+const TUBE_CSS = `
+      .tube-root { color: #f1f1f1; }
+      .tube-head { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; justify-content: space-between; margin: 0 0 1.3rem; }
+      .tube-brand { display: inline-flex; align-items: center; gap: .55rem; font-size: 1.4rem; font-weight: 700; letter-spacing: -.02em; color: #fff; }
+      .tube-brand a { color: inherit; text-decoration: none; display: inline-flex; align-items: center; gap: .55rem; }
+      .tube-play { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 27px; border-radius: 8px; background: #ff0033; color: #fff; flex: none; }
+      .tube-actions { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+      .tube-btn { display: inline-flex; align-items: center; gap: .45rem; padding: .5rem 1rem; border-radius: 999px; border: 1px solid #3f4450; background: #222331; color: #f1f1f1; font-size: .9rem; font-weight: 600; cursor: pointer; text-decoration: none; }
+      .tube-btn:hover { background: #2c2d40; }
+      .tube-btn.primary { background: #ff0033; border-color: #ff0033; color: #fff; }
+      .tube-btn.primary:hover { background: #e00030; }
+      .tube-search { flex: 1 1 220px; max-width: 24rem; display: flex; }
+      .tube-search input { flex: 1; min-width: 0; background: #121418; border: 1px solid #30343d; border-right: 0; color: #f1f1f1; border-radius: 999px 0 0 999px; padding: .5rem 1rem; outline: none; font-size: .92rem; }
+      .tube-search input:focus { border-color: #4a4f5c; }
+      .tube-search span { display: inline-flex; align-items: center; padding: 0 .9rem; background: #1d1f27; border: 1px solid #30343d; border-left: 0; border-radius: 0 999px 999px 0; color: #8a919e; }
+      .tube-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1.6rem 1rem; }
+      .tube-card { display: block; color: inherit; text-decoration: none; border-radius: 12px; min-width: 0; }
+      .tube-thumb { position: relative; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; background: radial-gradient(120% 120% at 20% 0%, #26304d 0%, #12141c 55%, #221530 100%); display: flex; align-items: center; justify-content: center; color: #566070; }
+      .tube-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+      .tube-thumb .tube-play { opacity: .92; }
+      .tube-vtitle { margin: .65rem 0 .25rem; font-size: .98rem; font-weight: 600; line-height: 1.35; color: #f1f1f1; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+      .tube-vrow { display: flex; align-items: center; gap: .55rem; color: #aaa; font-size: .85rem; min-width: 0; }
+      .tube-avatar { width: 28px; height: 28px; border-radius: 50%; background: linear-gradient(135deg, #333a4d, #20242f); color: #d7dde6; display: inline-flex; align-items: center; justify-content: center; font-size: .8rem; font-weight: 700; overflow: hidden; flex: none; text-decoration: none; }
+      .tube-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .tube-vrow .name { color: #d7dde6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .tube-empty { color: #8a919e; background: #16181f; border: 1px solid #262a33; border-radius: 12px; padding: 2.2rem 1.4rem; text-align: center; }
+      .tube-watch { max-width: 60rem; margin: 0 auto; }
+      .tube-player { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 14px; overflow: hidden; display: block; }
+      .tube-player video { width: 100%; height: 100%; display: block; background: #000; }
+      .tube-watch h1 { color: #f1f1f1; font-size: 1.25rem; line-height: 1.4; margin: .9rem 0 .4rem; }
+      .tube-watch-desc { color: #c9cdd4; background: #16181f; border: 1px solid #262a33; border-radius: 12px; padding: .9rem 1rem; margin: .8rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .93rem; }
+      .tube-back { color: #9aa3b2; font-size: .9rem; text-decoration: none; display: inline-flex; align-items: center; gap: .4rem; }
+      .tube-back:hover { color: #f1f1f1; }
+      .tube-channel-head { display: flex; gap: 1.1rem; align-items: center; margin: 0 0 1.6rem; }
+      .tube-channel-head .tube-avatar { width: 84px; height: 84px; font-size: 2rem; }
+      .tube-channel-head h1 { color: #fff; font-size: 1.5rem; margin: 0 0 .25rem; }
+      .tube-channel-head p { color: #9aa3b2; margin: 0; max-width: 44rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .tube-modal { border: 1px solid #2c313c; border-radius: 14px; background: #171921; color: #f1f1f1; padding: 0; max-width: 26rem; width: calc(100% - 2rem); }
+      .tube-modal::backdrop { background: rgba(0,0,0,.65); }
+      .tube-modal h2 { font-size: 1.1rem; margin: 0; padding: 1rem 1.2rem .4rem; color: #fff; }
+      .tube-modal form { display: grid; gap: .7rem; padding: .6rem 1.2rem 1.2rem; }
+      .tube-modal label { display: grid; gap: .3rem; font-size: .85rem; color: #aab1bd; }
+      .tube-modal input, .tube-modal textarea, .tube-modal select { background: #101219; border: 1px solid #2f343f; border-radius: 8px; color: #f1f1f1; padding: .5rem .7rem; font: inherit; }
+      .tube-modal textarea { min-height: 4.5rem; resize: vertical; }
+      .tube-modal .row { display: flex; gap: .6rem; justify-content: flex-end; align-items: center; }
+      .tube-hint { color: #8a919e; font-size: .8rem; margin: 0; }
+      @media (max-width: 640px) { .tube-channel-head { flex-direction: column; align-items: flex-start; } }`;
+
 // Welcome page (standalone, full-bleed): animated gradient, a CSS 3D cube, floating chips, and an info grid.
 const WELCOME_CSS = `
       * { box-sizing: border-box; }
@@ -327,7 +377,7 @@ function welcomePage() {
 // The logged-in app pages are rendered by the React bundle at /assets/app.js. The server sends a small
 // shell: styles, an empty mount point, and a JSON bootstrap block with the page data. The JSON block is
 // not a script, so the shell can ship a strict CSP (script-src 'self' comes from the server header).
-function appShell({ title, bootstrap, fallbackHtml = '' }) {
+function appShell({ title, bootstrap, fallbackHtml = '', extraCss = '' }) {
   const json = JSON.stringify(bootstrap).replace(/</g, '\\u003c');
   const noscript = '<noscript><p class="hint">This app needs JavaScript.</p></noscript>';
   return `<!doctype html>
@@ -336,7 +386,7 @@ function appShell({ title, bootstrap, fallbackHtml = '' }) {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${escapeHtml(title)}</title>
-    <style>${BASE_CSS}${APP_NAV_CSS}${DASHBOARD_CSS}
+    <style>${BASE_CSS}${APP_NAV_CSS}${DASHBOARD_CSS}${extraCss}
     </style>
   </head>
   <body class="wide">
@@ -398,6 +448,21 @@ function explorePage(user, { filesEnabled = false, maxBytes = 0, linkMaxFiles = 
   });
 }
 
+// The Tube pages: a dark, YouTube-like feed, watch screen, and channel page, all rendered by the
+// React bundle. The bootstrap block carries the feed/video/channel data; TUBE_CSS sets the look.
+// Every viewer is signed in - the routes redirect to /login first.
+function tubeFeedPage(boot) {
+  return appShell({ title: 'Tube', bootstrap: boot, extraCss: TUBE_CSS });
+}
+
+function tubeWatchPage(boot) {
+  return appShell({ title: `${boot.video.title} - Tube`, bootstrap: boot, extraCss: TUBE_CSS });
+}
+
+function tubeChannelPage(boot) {
+  return appShell({ title: `${boot.channel.name} - Tube`, bootstrap: boot, extraCss: TUBE_CSS });
+}
+
 // Public page for an upload link. A plain multipart form: no script, no cookie. The hidden uploadId is a fresh
 // UUID per page load, so a repeated submit of this page is stored once.
 function uploadPage({ label, token, maxBytes }) {
@@ -453,4 +518,4 @@ function errorPage(status, message, user = null) {
   return layout(`Error ${status}`, `<h1>Error ${status}</h1><p class="error">${escapeHtml(message)}</p>`, user);
 }
 
-module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, authForm, sharePage, uploadPage, uploadDonePage, errorPage };
+module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage };

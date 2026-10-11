@@ -17,6 +17,8 @@ const { CATEGORIES, sanitizeFilename, extensionOf, asciiFallback, encodeFilename
 const { checkStoredFile } = require('./file-checks');
 const { ChunkedUploads, SESSION_ID_RE } = require('./chunked-uploads');
 const { ImportJobs } = require('./import-jobs');
+const { TubeService } = require('./tube');
+const { USERNAME_RE } = require('./paths');
 const pages = require('./pages');
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -98,6 +100,8 @@ function buildFiles(env, authConfig, storage, now, overrides) {
       limits: overrides.importLimits,
       allowPrivate: url.allowPrivate !== undefined ? url.allowPrivate === true : limits.importAllowPrivate === true,
     }),
+    // Tube (channels + published videos) rides on the same data-repo storage and the file service.
+    tube: new TubeService({ storage, files: service, now }),
   };
 }
 
@@ -338,6 +342,74 @@ async function pageDashboard(ctx) {
   return redirect(ctx.res, '/home');
 }
 
+// ---- Tube pages. The same React shell as /home and /explore: styles, an empty root, and a JSON
+// bootstrap block with the page data. Everything is behind login, like the rest of the app.
+
+async function pageTube(ctx) {
+  requireConfigured(ctx);
+  const user = await currentUser(ctx);
+  if (!user) return redirect(ctx.res, '/login');
+  const files = ctx.auth.files;
+  const enabled = files.enabled;
+  sendHtml(
+    ctx.res,
+    200,
+    pages.tubeFeedPage({
+      page: 'tube',
+      user: { username: user.username },
+      filesEnabled: enabled,
+      channel: enabled ? await files.tube.getChannel(user) : null,
+      feed: { videos: enabled ? await files.tube.feed() : [] },
+    }),
+    { 'Content-Security-Policy': APP_SHELL_CSP },
+  );
+}
+
+// The watch screen. A video that is not published (or whose file is gone) is a plain 404 page.
+async function pageTubeWatch(ctx) {
+  requireConfigured(ctx);
+  const user = await currentUser(ctx);
+  if (!user) return redirect(ctx.res, '/login');
+  const files = ctx.auth.files;
+  const view = files.enabled ? await files.tube.videoView(ctx.params.fileId) : null;
+  if (!view) throw new AppError(404, 'NOT_FOUND', 'This video is not available.');
+  sendHtml(
+    ctx.res,
+    200,
+    pages.tubeWatchPage({
+      page: 'tube-watch',
+      user: { username: user.username },
+      filesEnabled: files.enabled,
+      video: view.video,
+      channel: view.channel,
+      myChannel: await files.tube.getChannel(user),
+    }),
+    { 'Content-Security-Policy': APP_SHELL_CSP },
+  );
+}
+
+async function pageTubeChannel(ctx) {
+  requireConfigured(ctx);
+  const user = await currentUser(ctx);
+  if (!user) return redirect(ctx.res, '/login');
+  const files = ctx.auth.files;
+  const view = files.enabled ? await files.tube.channelPage(ctx.params.user) : null;
+  if (!view) throw new AppError(404, 'NOT_FOUND', 'No such channel.');
+  sendHtml(
+    ctx.res,
+    200,
+    pages.tubeChannelPage({
+      page: 'tube-channel',
+      user: { username: user.username },
+      filesEnabled: files.enabled,
+      channel: view.channel,
+      videos: view.videos,
+      myChannel: await files.tube.getChannel(user),
+    }),
+    { 'Content-Security-Policy': APP_SHELL_CSP },
+  );
+}
+
 // ---- form posts (browser pages)
 
 async function formLogin(ctx) {
@@ -557,21 +629,40 @@ function previewHeaders(name) {
 
 const previewDisposition = (name) => `inline; filename="${asciiFallback(name)}"; filename*=UTF-8''${encodeFilenameStar(name)}`;
 
+// Resolves a fileId for a signed-in reader. The owner reads their own manifest entry as always. The
+// Tube access rule extends this: a file that is published as a Tube video, or is in use as a channel
+// logo, may be streamed by ANY signed-in user (read-only). Unpublished files keep the old rules.
+async function entryForReader(files, user, fileId) {
+  try {
+    return { entry: await files.service.readReady(user.id, fileId), viaTube: false };
+  } catch (err) {
+    if (err instanceof AppError && err.status === 404 && files.tube) {
+      const pub = await files.tube.resolvePublic(fileId);
+      if (pub) return { entry: pub.entry, viaTube: true };
+    }
+    throw err;
+  }
+}
+
 async function apiDownloadFile(ctx) {
-  const service = requireFileStorage(ctx);
+  const files = fileServices(ctx);
   const user = await requireUser(ctx);
-  const opened = await service.download(user.id, ctx.params.id);
+  const { entry } = await entryForReader(files, user, ctx.params.id);
+  const opened = await files.service.openEntry(entry);
   await streamFile(ctx, opened, { disposition: contentDisposition(opened.file.name) });
 }
 
 async function apiPreviewFile(ctx) {
-  const service = requireFileStorage(ctx);
+  const files = fileServices(ctx);
   const user = await requireUser(ctx);
-  const entry = await service.readReady(user.id, ctx.params.id);
-  if (!isPreviewable(entry.name)) {
+  const { entry, viaTube } = await entryForReader(files, user, ctx.params.id);
+  // A published Tube video may always be shown inline: its stored type is video/*, and the one
+  // extension missing from the preview list (.mkv) is covered by the media preview headers.
+  const publishedVideo = viaTube && String(entry.type).startsWith('video/');
+  if (!isPreviewable(entry.name) && !publishedVideo) {
     throw new AppError(415, 'PREVIEW_NOT_AVAILABLE', 'This file type cannot be previewed. Download it instead.');
   }
-  const opened = await service.openEntry(entry);
+  const opened = await files.service.openEntry(entry);
   await streamFile(ctx, opened, {
     disposition: previewDisposition(entry.name),
     extra: previewHeaders(entry.name),
@@ -838,6 +929,59 @@ async function apiDeleteFile(ctx) {
   ok(ctx, 200, await service.remove(user.id, ctx.params.id));
 }
 
+// ---- Tube JSON API. Every route requires login; the writes add the same CSRF header check as the
+// other mutating JSON routes, and a modest hourly cap, since each one rewrites the shared document.
+
+const TUBE_WRITES_PER_HOUR = 120;
+
+async function apiTubeFeed(ctx) {
+  const files = fileServices(ctx);
+  await requireUser(ctx);
+  ok(ctx, 200, { videos: await files.tube.feed() });
+}
+
+async function apiTubeMyChannelGet(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { channel: await files.tube.getChannel(user) });
+}
+
+async function apiTubeMyChannelPut(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  ok(ctx, 200, { channel: await files.tube.putChannel(user, body) });
+}
+
+async function apiTubeChannelGet(ctx) {
+  const files = fileServices(ctx);
+  await requireUser(ctx);
+  const view = await files.tube.channelPage(ctx.params.user);
+  if (!view) throw new AppError(404, 'NOT_FOUND', 'No such channel.');
+  ok(ctx, 200, view);
+}
+
+async function apiTubePublish(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  const { video, created } = await files.tube.publishVideo(ctx.params.fileId, user, body);
+  ok(ctx, created ? 201 : 200, { video });
+}
+
+async function apiTubeUnpublish(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  await files.tube.unpublishVideo(ctx.params.fileId, user);
+  ok(ctx, 200, { ok: true });
+}
+
 const FILE_ID = '([a-f0-9]{32})';
 const LINK_ID = '([a-f0-9]{32})';
 const SESSION = `(${SESSION_ID_RE.source.slice(1, -1)})`;
@@ -887,6 +1031,26 @@ const ROUTES = [
   { method: 'DELETE', pattern: new RegExp(`^/api/upload-links/${LINK_ID}$`), handler: apiRevokeUploadLink },
   { method: 'GET', pattern: new RegExp(`^/u/(${TOKEN})$`), handler: pageUploadLink },
   { method: 'POST', pattern: new RegExp(`^/u/(${TOKEN})/upload$`), handler: postUploadLink, csrfExempt: true },
+  // ---- Tube: channels and published videos. All behind login, like the rest of the app.
+  { method: 'GET', path: '/api/tube/feed', handler: apiTubeFeed },
+  { method: 'GET', path: '/api/tube/my-channel', handler: apiTubeMyChannelGet },
+  { method: 'PUT', path: '/api/tube/my-channel', handler: apiTubeMyChannelPut },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/tube/channels/(${USERNAME_RE.source.slice(1, -1)})$`),
+    handler: apiTubeChannelGet,
+    keys: ['user'],
+  },
+  { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/publish$`), handler: apiTubePublish, keys: ['fileId'] },
+  { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/unpublish$`), handler: apiTubeUnpublish, keys: ['fileId'] },
+  { method: 'GET', path: '/tube', handler: pageTube },
+  { method: 'GET', pattern: new RegExp(`^/tube/watch/${FILE_ID}$`), handler: pageTubeWatch, keys: ['fileId'] },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/tube/channel/(${USERNAME_RE.source.slice(1, -1)})$`),
+    handler: pageTubeChannel,
+    keys: ['user'],
+  },
 ];
 
 // Returns every route whose path matches, with any path parameters.
