@@ -19,7 +19,7 @@ Browser ──HTTPS──> Node.js server (src/server.js)
   shares/, upload-links/                           asset <fileId><ext>
 ```
 
-- `src/server.js` owns routing, cookies, CSRF and origin checks, rate limits, and the HTML pages (through `src/pages.js`). The browser code for the dashboard is in `src/dashboard-client.js`, embedded in the page.
+- `src/server.js` owns routing, cookies, CSRF and origin checks, rate limits, and the HTML pages (through `src/pages.js`). The logged-in app pages (`/home`, `/explore`) are React shells: the server sends styles, a JSON bootstrap block, and `/assets/app.js` - the compiled React bundle from `client/` (built with esbuild, committed under `public/assets/`).
 - Nothing is cached in memory across requests except rate-limit counters and the storage-repo privacy check.
 - The app has one runtime dependency, `busboy`, for streaming multipart parsing.
 
@@ -127,7 +127,7 @@ Jobs are kept in memory. Only the owner can see or cancel a job. Logs and stored
 | CSRF | Every state-changing session route needs `X-Requested-With: fetch`, and a request with an `Origin` must match the host or an allowed origin. |
 | Public links | Credentials are random 256-bit tokens. Only their hashes are used for lookup. Revoke, re-enable, and delete all end old links. |
 | Downloads | `Content-Disposition: attachment`, `nosniff`, `Cache-Control: no-store`. Unknown types are `application/octet-stream`. |
-| Previews | Only previewable types. Inline with a sandboxed CSP. Frames only from this site. HTML and SVG are never previewed. |
+| Previews | Only previewable types. Inline with a sandboxed CSP; media types also get `media-src 'self'` so a tab can play them. Frames only from this site. HTML and SVG are never previewed. |
 | Content checks | Known types are checked by signature (first 16 bytes), text by UTF-8 validity, so a renamed file is refused. |
 | Names | Path parts and control characters are removed. Storage paths never come from the user's name. |
 | Storage repo | Must be private. The app checks before accepting any upload. |

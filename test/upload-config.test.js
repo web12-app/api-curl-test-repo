@@ -127,18 +127,19 @@ test('buildAuth without login settings gives the disabled shape, with no service
   assert.ok(Array.isArray(auth.files.missing));
 });
 
-test('the explore page shows the file-storage notice and no upload controls when storage is off', () => {
+test('the explore page shell shows the file-storage notice and no app bundle mounts when storage is off', () => {
   const html = explorePage({ username: 'ann' }, { filesEnabled: false });
   assert.match(html, /File storage is not set up/);
-  assert.ok(!html.includes('id="url-form"'), 'no URL import form');
-  assert.ok(!html.includes('id="drop"'), 'no drop zone');
+  assert.ok(!html.includes('"filesEnabled":true'), 'bootstrap says storage is off');
+  assert.ok(html.includes('"filesEnabled":false'), 'bootstrap says storage is off');
 });
 
-test('the explore page shows the URL import form next to the drop zone when storage is on', () => {
-  const html = explorePage({ username: 'ann' }, { filesEnabled: true, maxBytes: 25 * 1024 * 1024 });
-  const drop = html.indexOf('id="drop"');
-  const form = html.indexOf('id="url-form"');
-  assert.ok(drop > 0 && form > drop, 'the form follows the drop zone');
-  assert.match(html, /Upload from URL/);
-  assert.match(html, /placeholder="Paste any file link \(http, https, data:\)"/);
+test('the explore page shell carries the limits in the bootstrap block when storage is on', () => {
+  const html = explorePage({ username: 'ann' }, { filesEnabled: true, maxBytes: 25 * 1024 * 1024, linkMaxFiles: 20, linkMaxBytes: 500 * 1024 * 1024 });
+  assert.ok(html.includes('"page":"explore"'), 'the page kind');
+  assert.ok(html.includes('"filesEnabled":true'), 'storage on');
+  assert.ok(html.includes('"maxBytes":26214400'), 'the per-file limit');
+  assert.ok(html.includes('"linkMaxFiles":20'), 'the per-link file count');
+  assert.ok(html.includes('"linkMaxBytes":524288000'), 'the per-link byte budget');
+  assert.ok(html.includes('src="/assets/app.js"'), 'the React bundle is loaded');
 });

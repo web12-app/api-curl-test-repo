@@ -619,16 +619,18 @@ test('the storage repository cannot be the same as the private data repository',
   assert.match(loaded.missing[0], /must differ/);
 });
 
-test('the explore page has the upload and list UI, and contains no GitHub details', async () => {
+test('the explore page ships the React app shell with the bootstrap data, and contains no GitHub details', async () => {
   await withApp({}, async (app) => {
     const user = await signup(app);
     await upload(app, user.cookie, 'listed.txt', 'data');
     const res = await authed(app, user.cookie, '/explore');
     assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-security-policy'), APP_SHELL_CSP);
     const html = await res.text();
-    for (const marker of ['id="drop"', 'id="picker"', 'id="files"', 'id="search"', 'id="category"', 'X-Requested-With']) {
+    for (const marker of ['id="root"', 'id="app-bootstrap"', 'src="/assets/app.js"', '"page":"explore"', '"filesEnabled":true', 'application/json']) {
       assert.ok(html.includes(marker), marker);
     }
+    assert.match(html, /"maxBytes":\d+/);
     assert.doesNotMatch(html, /ghp_|api\.github|uploads\.github|upload-[a-f0-9]{8}|assetId/);
     assert.match(html, new RegExp(user.username));
     assert.doesNotMatch(html, /listed\.txt/, 'the page loads the list itself; it is not rendered into the HTML');
@@ -640,6 +642,28 @@ test('the explore page has the upload and list UI, and contains no GitHub detail
     const homeHtml = await home.text();
     assert.match(homeHtml, new RegExp(user.username));
     assert.doesNotMatch(homeHtml, /id="files"|id="drop"|id="search"/);
+  });
+});
+
+const APP_SHELL_CSP =
+  "default-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'";
+
+test('the React bundle is served from /assets with a JavaScript content type', async () => {
+  await withApp({}, async (app) => {
+    const res = await fetch(`${app.base}/assets/app.js`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /text\/javascript/);
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    const body = await res.text();
+    assert.ok(body.length > 1000, 'the bundle is not empty');
+    assert.doesNotMatch(body, /ghp_|SESSION_SECRET/);
+    const missing = await fetch(`${app.base}/assets/nope.js`);
+    assert.equal(missing.status, 404);
+    const wrongType = await fetch(`${app.base}/assets/app.exe`);
+    assert.equal(wrongType.status, 404);
+    // The pattern only accepts one plain path segment, so traversal names cannot reach the disk.
+    const traversal = await fetch(`${app.base}/assets/..%2Fserver.js`);
+    assert.notEqual(traversal.status, 200);
   });
 });
 
@@ -939,6 +963,7 @@ test('a video preview is inline with its own type and the sandbox policy', async
     assert.equal(res.headers.get('content-type'), 'video/mp4');
     assert.match(res.headers.get('content-disposition'), /^inline;/);
     assert.match(res.headers.get('content-security-policy'), /sandbox/);
+    assert.match(res.headers.get('content-security-policy'), /media-src 'self'/, 'a browser tab may play the video');
     assert.equal(res.headers.get('x-frame-options'), 'SAMEORIGIN');
   });
 });

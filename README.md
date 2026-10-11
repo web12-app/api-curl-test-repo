@@ -16,16 +16,23 @@ node --env-file=.env src/server.js
 
 Open <http://localhost:3000>. The welcome page explains the app with a 3D intro; sign up and you land on your app home page with live stats. Files, uploads, and upload links live under **Explore**. Signed-in users never see the welcome page again until they log out.
 
+The app pages (/home, /explore) are a React app. The compiled bundle ships in `public/assets/app.js`, so `npm start` needs no build step. To change the frontend, edit `client/` and rebuild:
+
+```bash
+npm run build:client        # esbuild bundles client/main.jsx into public/assets/app.js
+npm run watch:client        # rebuild on every change while developing
+```
+
 Without configuration the home page and `/api/health` still work. Login and files report which settings are missing, by name.
 
 ## What it does
 
 - Sign up and log in. Passwords are stored only as scrypt hashes.
 - Upload any file type, up to 2 GB per file (GitHub's own asset limit). Files of 4 MB and more are sent in pieces automatically, so an interrupted upload resumes instead of restarting. Known types are checked against their content.
-- Preview images, PDF, text, video, and audio. Other types download only.
+- Preview images, PDF, text, video, and audio in the app (image/video/audio render as native `<img>`/`<video>`/`<audio>` elements) or in a new browser tab. Other types download only.
 - Share a file with a link that anyone can open. Links can be turned off at any time.
 - Create an upload link that lets someone without an account send you a file. Links are limited per link and can be revoked.
-- Import a file from a public https:// URL. The download runs in the background and survives a page reload.
+- Import a file from any http, https, or data: link. The download runs in the background and survives a page reload.
 
 ## Documentation
 
@@ -54,8 +61,9 @@ src/paths.js            the only paths the app writes in the private data repo
 src/redact.js           masked names and short references for logs
 src/github-storage.js   Contents API client (private data repo)
 src/github-releases.js  Releases API client (storage repo)
-src/pages.js            HTML pages
-src/dashboard-client.js dashboard browser code
+src/pages.js            HTML pages (welcome, auth, share, upload links) and the React app shells
+client/                 React source for /home and /explore (bundled by esbuild)
+public/assets/app.js    the compiled React bundle, committed so npm start needs no build
 pages/                  static welcome pages (not served by the Node app)
 .github/workflows/      live-tunnel.yml: run the app on a GitHub runner with an ngrok domain
 test/                   node:test suites and a fake GitHub

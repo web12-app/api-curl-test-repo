@@ -46,7 +46,8 @@ The list shows name, type, size, upload time, and actions.
 | --- | --- |
 | Search | Filters by file name as you type. |
 | Type filter | Images, Documents, Archives, Video, Audio, Other, or All. |
-| **Preview** | Opens the file in a dialog. Shown only for previewable types. |
+| **Preview** | Opens the file in a dialog: images render as `<img>`, video as `<video>`, audio as `<audio>`, PDFs in the built-in viewer, and text as plain text. Shown only for previewable types. |
+| **Open tab** | Opens the file in a new browser tab, where the browser renders it itself. Shown only for previewable types. |
 | **Download** | Downloads the original bytes as an attachment. |
 | **Share** / **Stop sharing** | Makes the file public through a link, or turns the link off. See [Sharing](#sharing-a-file). |
 | **Delete** | Removes the file after you confirm. This cannot be undone. |
@@ -85,7 +86,9 @@ Notes:
 
 ## Previewing a file
 
-Click **Preview**. Images, PDFs, text, video, and audio open in a dialog. The preview is served by this site and runs in a sandbox: a previewed file cannot run scripts or reach the page around it.
+Click **Preview**. Images, PDFs, text, video, and audio open in a dialog, rendered with the browser's own elements (`<img>`, `<video controls>`, `<audio controls>`, the PDF viewer, and plain text). The dialog also has **Open in new tab**, which opens `/api/files/<id>/preview` in a new tab so the browser renders the file full-page; and **Download**.
+
+The preview is served by this site and runs in a sandbox: a previewed file cannot run scripts or reach the page around it. Video and audio responses carry a `media-src 'self'` policy so a browser tab can play them.
 
 ## Sharing a file
 
