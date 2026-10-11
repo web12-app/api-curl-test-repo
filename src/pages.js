@@ -1,8 +1,8 @@
 'use strict';
 
 // Server-rendered HTML. Every value from a request is escaped before it is written.
+// The logged-in app pages (/home, /explore) are React shells; the React bundle lives in public/assets/app.js.
 const crypto = require('node:crypto');
-const { dashboardClient } = require('./dashboard-client');
 
 const ERROR_TEXT = {
   INVALID_CREDENTIALS: 'Wrong username or password.',
@@ -60,6 +60,14 @@ const DASHBOARD_CSS = `
       dialog.preview[open] { display: flex; flex-direction: column; }
       .preview-bar { display: flex; justify-content: space-between; align-items: center; gap: .5rem; padding: .5rem .75rem; border-bottom: 1px solid #d0d7de; }
       .preview-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .preview-bar .preview-bar-actions { display: flex; gap: .4rem; flex: none; overflow: visible; }
+      .preview-bar .preview-bar-actions .button, .preview-bar .preview-bar-actions button { font-size: .85rem; padding: .3rem .6rem; }
+      .preview-body { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; background: #f6f8fa; }
+      .preview-media { max-width: 100%; max-height: 100%; display: block; margin: 0 auto; }
+      .preview-audio { width: 100%; padding: 2rem; }
+      .preview-audio audio { width: 100%; }
+      .preview-text { white-space: pre-wrap; word-break: break-word; padding: 1rem; margin: 0; width: 100%; box-sizing: border-box; font-size: .85rem; }
+      .preview-inner-frame { flex: 1; width: 100%; border: 0; background: #f6f8fa; }
       #preview-frame { flex: 1; width: 100%; border: 0; background: #f6f8fa; }
       .share-preview { width: 100%; height: 60vh; border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa; }
       body.wide { max-width: 64rem; }
@@ -268,7 +276,7 @@ function welcomePage() {
         <div class="hero-copy">
           <span class="pill">${ICON.spark} Free &middot; Private &middot; Yours</span>
           <h1>Store files in your own GitHub repositories</h1>
-          <p>Create an account, upload any kind of file up to 25&nbsp;MB, preview it right in the browser, and share it with one link. The server keeps no copies - your bytes live as release assets in a private GitHub repository only you can read.</p>
+          <p>Create an account, upload any kind of file up to 2&nbsp;GB, preview it right in the browser or in a new tab, and share it with one link. The server keeps no copies - your bytes live as release assets in a private GitHub repository only you can read.</p>
           <div class="cta-row">
             <a class="btn primary" href="/signup">${ICON.zap} Get started</a>
             <a class="btn ghost" href="/login">Log in</a>
@@ -299,11 +307,11 @@ function welcomePage() {
         <p class="sub">Everything you get with a free account.</p>
         <div class="grid">
           <article class="card">${ICON.shield}<h3>Secure accounts</h3><p>Passwords are stored only as scrypt hashes, sessions are signed cookies, and every form is checked against cross-site posts.</p></article>
-          <article class="card">${ICON.folder}<h3>Any file, up to 25 MB</h3><p>Documents, video, audio, archives - file types are verified by their content signature, not just by the file name.</p></article>
-          <article class="card">${ICON.eye}<h3>Instant previews</h3><p>Images, PDF, text, video, and audio open in a sandboxed viewer. Unknown or active types download safely instead.</p></article>
+          <article class="card">${ICON.folder}<h3>Any file, up to 2 GB</h3><p>Documents, video, audio, archives - file types are verified by their content signature, not just by the file name.</p></article>
+          <article class="card">${ICON.eye}<h3>Instant previews</h3><p>Images, PDF, text, video, and audio open in a sandboxed viewer or a new browser tab. Unknown or active types download safely instead.</p></article>
           <article class="card">${ICON.link}<h3>Share links</h3><p>Publish a file with one link and turn it off whenever you want. Re-enabling makes a fresh link, so old ones stop working.</p></article>
           <article class="card">${ICON.upload}<h3>Upload links</h3><p>Let someone without an account send you a file through a revocable link with its own file and size limits.</p></article>
-          <article class="card">${ICON.layers}<h3>Resume big uploads</h3><p>Large files are sent in verified pieces, so a dropped connection never restarts from zero. You can also import straight from any http or https URL.</p></article>
+          <article class="card">${ICON.layers}<h3>Resume big uploads</h3><p>Large files are sent in verified pieces, so a dropped connection never restarts from zero. You can also import straight from any http, https, or data: link.</p></article>
         </div>
       </section>
     </main>
@@ -316,81 +324,40 @@ function welcomePage() {
 `;
 }
 
-// Browser code for the home page stats. Fetches this app's own API with the session cookie and fills the
-// four stat cards. Writes only with textContent.
-function homeStatsClient() {
-  var box = document.getElementById('home-config');
-  if (!box || box.getAttribute('data-enabled') !== '1') return;
-  function fmt(bytes) {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  }
-  function set(id, text) {
-    var node = document.getElementById(id);
-    if (node) node.textContent = text;
-  }
-  Promise.all([
-    fetch('/api/files').then(function (r) { return r.ok ? r.json() : { data: [] }; }),
-    fetch('/api/upload-links').then(function (r) { return r.ok ? r.json() : { data: { links: [] } }; }),
-  ]).then(function (results) {
-    var files = Array.isArray(results[0].data) ? results[0].data : [];
-    var links = (results[1].data && results[1].data.links) || [];
-    var ready = files.filter(function (f) { return f.status === 'ready' || f.status === 'deleting'; });
-    var bytes = 0;
-    ready.forEach(function (f) { bytes += f.size || 0; });
-    var shared = ready.filter(function (f) { return f.visibility === 'public'; }).length;
-    var active = links.filter(function (l) { return !l.revokedAt; }).length;
-    set('stat-files', String(ready.length));
-    set('stat-bytes', fmt(bytes));
-    set('stat-shared', String(shared));
-    set('stat-links', String(active));
-  }).catch(function () {
-    set('stat-files', '-'); set('stat-bytes', '-'); set('stat-shared', '-'); set('stat-links', '-');
-  });
+// The logged-in app pages are rendered by the React bundle at /assets/app.js. The server sends a small
+// shell: styles, an empty mount point, and a JSON bootstrap block with the page data. The JSON block is
+// not a script, so the shell can ship a strict CSP (script-src 'self' comes from the server header).
+function appShell({ title, bootstrap, fallbackHtml = '' }) {
+  const json = JSON.stringify(bootstrap).replace(/</g, '\\u003c');
+  const noscript = '<noscript><p class="hint">This app needs JavaScript.</p></noscript>';
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${escapeHtml(title)}</title>
+    <style>${BASE_CSS}${APP_NAV_CSS}${DASHBOARD_CSS}
+    </style>
+  </head>
+  <body class="wide">
+    <div id="root">${fallbackHtml}${noscript}</div>
+    <script type="application/json" id="app-bootstrap">${json}</script>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
+`;
 }
 
-// The logged-in app home page: icon top menu, greeting, live stats, quick actions. The file list lives on
-// /explore, never here. filesEnabled is false when the storage settings are missing: the page then says so.
-function appHomePage(user, { filesEnabled = false } = {}) {
-  const name = escapeHtml(user.username);
-  const stats = filesEnabled
-    ? `<div class="stat-grid" id="home-stats">
-         <div class="stat-card"><div class="num" id="stat-files">&hellip;</div><div class="lbl">Files</div></div>
-         <div class="stat-card"><div class="num" id="stat-bytes">&hellip;</div><div class="lbl">Storage used</div></div>
-         <div class="stat-card"><div class="num" id="stat-shared">&hellip;</div><div class="lbl">Shared files</div></div>
-         <div class="stat-card"><div class="num" id="stat-links">&hellip;</div><div class="lbl">Active upload links</div></div>
-       </div>`
-    : '<p class="error">File storage is not set up on this server yet. Login works; uploads are unavailable.</p>';
-  const config = `<div id="home-config" data-enabled="${filesEnabled ? 1 : 0}" hidden></div>`;
-  return layout(
-    'Home',
-    `<div class="profile">
-       <div>
-         <h1>Welcome back, ${name}</h1>
-         <p>Your space is ready. Files and uploads live under <a href="/explore">Explore</a> - this page stays an overview.</p>
-       </div>
-     </div>
-     <div id="notices" class="notices" aria-live="polite"></div>
-     <h2>Overview</h2>
-     ${stats}
-     <h2>Quick actions</h2>
-     <div class="quick-grid">
-       <a class="quick-card" href="/explore">${ICON.folder}<div><h3>Explore files</h3><p>Browse, search, preview, share, and download everything you have stored.</p></div></a>
-       <a class="quick-card" href="/explore#upload">${ICON.upload}<div><h3>Upload</h3><p>Drag files in, pick them, or import from any http or https URL.</p></div></a>
-       <a class="quick-card" href="/explore#links">${ICON.link}<div><h3>Upload links</h3><p>Let someone without an account send you a file through a revocable link.</p></div></a>
-     </div>
-     <h2>Good to know</h2>
-     <ul class="facts">
-       <li>Every file is capped at 25 MB; file types are verified by their content, not just the name.</li>
-       <li>Your bytes live as release assets in a private GitHub repository - the server keeps no copies.</li>
-       <li>Share and upload links can be revoked at any time; revoking stops old links immediately.</li>
-     </ul>
-     ${config}
-     <script>(${homeStatsClient.toString()})();</script>`,
-    user,
-    { wide: true, extraCss: DASHBOARD_CSS, active: 'home' },
-  );
+const STORAGE_NOTICE = '<p class="error">File storage is not set up on this server yet. Login works; uploads are unavailable.</p>';
+
+// The app home page: React renders the greeting, live stats, quick actions, and facts. The file list
+// lives on /explore, never here. filesEnabled is false when the storage settings are missing.
+function appHomePage(user, { filesEnabled = false, maxBytes = 0 } = {}) {
+  return appShell({
+    title: 'Home',
+    bootstrap: { page: 'home', user: { username: user.username }, filesEnabled, maxBytes },
+    fallbackHtml: filesEnabled ? '' : STORAGE_NOTICE,
+  });
 }
 
 function authForm({ mode, error }) {
@@ -414,110 +381,21 @@ function authForm({ mode, error }) {
   );
 }
 
-// The explorer: uploads, the file list, and upload links. It keeps the old dashboard's element IDs so the
-// embedded client script works unchanged. filesEnabled is false when the storage settings are missing.
+// The explorer: uploads, the file list, and upload links, all rendered by the React bundle.
+// filesEnabled is false when the storage settings are missing: the page then says so.
 function explorePage(user, { filesEnabled = false, maxBytes = 0, linkMaxFiles = 0, linkMaxBytes = 0 } = {}) {
-  const name = escapeHtml(user.username);
-  if (!filesEnabled) {
-    return layout(
-      'Explore files',
-      `<div class="profile"><div><h1>Explore files</h1><p>Signed in as <strong>${name}</strong>.</p></div></div>
-       <p class="error">File storage is not set up on this server yet. Login works; uploads are unavailable.</p>`,
-      user,
-      { wide: true, extraCss: DASHBOARD_CSS, active: 'explore' },
-    );
-  }
-  const config = `<div id="dash-config" data-enabled="1" data-max-bytes="${escapeHtml(maxBytes)}" hidden></div>`;
-  const mb = escapeHtml(fmtLimit(maxBytes));
-  const linkMb = escapeHtml(fmtLimit(linkMaxBytes));
-  return layout(
-    'Explore files',
-    `<div class="profile">
-       <div>
-         <h1>Explore files</h1>
-         <p>Signed in as <strong>${name}</strong>. Your files never appear on the home page - they live here.</p>
-       </div>
-       <p class="quota" id="quota" aria-live="polite"></p>
-     </div>
-     <div id="notices" class="notices" aria-live="polite"></div>
-
-     <section aria-labelledby="upload-title" id="upload">
-       <h2 id="upload-title">Upload</h2>
-       <div id="drop" class="drop" tabindex="0">
-         <p>Drag files here, or</p>
-         <button type="button" id="pick">Choose files</button>
-         <input type="file" id="picker" multiple hidden>
-         <p class="hint">Any file type, up to ${mb} per file. Images, video, audio, PDF, and text can be previewed. Other types download as files. Files of 4 MB and above are sent in pieces automatically: if the connection drops, choose the same file again to resume it.</p>
-       </div>
-       <form id="url-form" class="url-form">
-         <label for="url-input">Upload from URL</label>
-         <div class="url-row">
-           <input type="text" id="url-input" name="url" inputmode="url" placeholder="Paste any file link (http, https, data:)" aria-label="Paste any file link" autocomplete="off" maxlength="16384" required spellcheck="false">
-           <button type="submit" id="url-submit">Import</button>
-         </div>
-         <p class="hint">Paste any direct link to a file: http:// or https:// (any port, IP address, or user:pass for private files), or a data: link, up to ${mb}. The download runs in the background and keeps going even if you reload the page; the link is not kept after the import finishes.</p>
-       </form>
-       <ul id="queue" class="queue" aria-label="Uploads"></ul>
-       <ul id="imports" class="queue" aria-label="Imports from URL"></ul>
-     </section>
-
-     <section aria-labelledby="files-title" id="files">
-       <h2 id="files-title">Your files</h2>
-       <div class="toolbar">
-         <label>Search
-           <input type="search" id="search" placeholder="File name" maxlength="100" autocomplete="off">
-         </label>
-         <label>Type
-           <select id="category">
-             <option value="">All types</option>
-             <option value="image">Images</option>
-             <option value="document">Documents</option>
-             <option value="archive">Archives</option>
-             <option value="video">Video</option>
-             <option value="audio">Audio</option>
-             <option value="other">Other</option>
-           </select>
-         </label>
-       </div>
-       <p id="files-status" role="status">Loading your files…</p>
-       <table id="files" class="files">
-         <thead>
-           <tr><th>Name</th><th>Type</th><th>Size</th><th>Uploaded</th><th><span class="sr">Actions</span></th></tr>
-         </thead>
-         <tbody></tbody>
-       </table>
-     </section>
-     <dialog id="preview" class="preview" aria-labelledby="preview-title">
-       <div class="preview-bar">
-         <span id="preview-title"></span>
-         <button type="button" id="preview-close">Close</button>
-       </div>
-       <iframe id="preview-frame" title="File preview"></iframe>
-     </dialog>
-
-     <section aria-labelledby="links-title" id="links">
-       <h2 id="links-title">Upload links</h2>
-       <p class="hint">Anyone with a link can upload one file at a time to your account, with no login. Revoke a link when you no longer want it to work. Each link accepts up to ${escapeHtml(linkMaxFiles)} files and ${linkMb} in total. Files uploaded through a link count toward your file limit.</p>
-       <form id="link-form" class="toolbar">
-         <label>Label (optional)
-           <input type="text" id="link-label" maxlength="60" autocomplete="off">
-         </label>
-         <div><button type="submit" id="link-create">Create upload link</button></div>
-       </form>
-       <div id="link-result" role="status"></div>
-       <p id="links-status" role="status"></p>
-       <table id="links" class="files">
-         <thead>
-           <tr><th>Label</th><th>Status</th><th>Uploads</th><th>Created</th><th><span class="sr">Actions</span></th></tr>
-         </thead>
-         <tbody></tbody>
-       </table>
-     </section>
-     ${config}
-     <script>(${dashboardClient.toString()})();</script>`,
-    user,
-    { wide: true, extraCss: DASHBOARD_CSS, active: 'explore' },
-  );
+  return appShell({
+    title: 'Explore files',
+    bootstrap: {
+      page: 'explore',
+      user: { username: user.username },
+      filesEnabled,
+      maxBytes,
+      linkMaxFiles,
+      linkMaxBytes,
+    },
+    fallbackHtml: filesEnabled ? '' : STORAGE_NOTICE,
+  });
 }
 
 // Public page for an upload link. A plain multipart form: no script, no cookie. The hidden uploadId is a fresh
@@ -562,7 +440,10 @@ function sharePage({ name, size, type, previewable }, token) {
     `<h1>Shared file</h1>
      <p><strong>${escapeHtml(name)}</strong> · ${escapeHtml(mb)} · ${escapeHtml(type.split(';')[0])}</p>
      ${preview}
-     <p><a class="button" href="/s/${t}/download" download>Download</a></p>`,
+     <p>
+       ${previewable ? `<a class="button" href="/s/${t}/preview" target="_blank" rel="noopener">Open in new tab</a> ` : ''}
+       <a class="button" href="/s/${t}/download" download>Download</a>
+     </p>`,
     null,
     { wide: true, extraCss: DASHBOARD_CSS },
   );

@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const http = require('node:http');
+const path = require('node:path');
 const { Readable } = require('node:stream');
 const { AppError, ConflictError, StorageError } = require('./errors');
 const { loadAuthConfig, loadFileConfig, loadUploadSettings } = require('./config');
@@ -295,12 +296,22 @@ function pageAuthForm(mode) {
   };
 }
 
+// The app shell CSP: styles are inline (server-rendered CSS), scripts only from this origin (the React
+// bundle), and the bootstrap block is JSON data, not script. Everything else stays same-origin.
+const APP_SHELL_CSP =
+  "default-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; frame-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; object-src 'none'";
+
 // The app home page: overview, stats, quick actions. No file list here - that lives on /explore.
 async function pageAppHome(ctx) {
   requireConfigured(ctx);
   const user = await currentUser(ctx);
   if (!user) return redirect(ctx.res, '/login');
-  sendHtml(ctx.res, 200, pages.appHomePage(user, { filesEnabled: ctx.auth.files.enabled }));
+  sendHtml(
+    ctx.res,
+    200,
+    pages.appHomePage(user, { filesEnabled: ctx.auth.files.enabled, maxBytes: ctx.auth.files.enabled ? ctx.auth.files.service.limits.maxFileBytes : 0 }),
+    { 'Content-Security-Policy': APP_SHELL_CSP },
+  );
 }
 
 // The file explorer: uploads, the file list, and upload links.
@@ -318,6 +329,7 @@ async function pageExplore(ctx) {
       linkMaxFiles: files.enabled ? files.service.limits.linkMaxFiles : 0,
       linkMaxBytes: files.enabled ? files.service.limits.linkMaxBytes : 0,
     }),
+    { 'Content-Security-Policy': APP_SHELL_CSP },
   );
 }
 
@@ -471,6 +483,30 @@ async function storeUpload(ctx, service, { uid, linkId, rateKey, perHour }) {
   }
 }
 
+// The app pages run the React bundle from public/assets. Only plain file names are served, from one
+// directory, so there is no path traversal. Cached briefly: a redeploy swaps the bundle and old pages
+// fetch the new one within minutes.
+const ASSETS_DIR = path.join(__dirname, '..', 'public', 'assets');
+const ASSET_TYPES = {
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+};
+
+async function serveAsset(ctx) {
+  const ext = path.extname(ctx.params.name).toLowerCase();
+  const type = ASSET_TYPES[ext];
+  if (!type) throw new AppError(404, 'NOT_FOUND', 'Not found');
+  let body;
+  try {
+    body = await fs.promises.readFile(path.join(ASSETS_DIR, ctx.params.name));
+  } catch {
+    throw new AppError(404, 'NOT_FOUND', 'Not found');
+  }
+  send(ctx.res, 200, { 'Content-Type': type, 'Content-Length': String(body.length), 'Cache-Control': 'public, max-age=300' }, body);
+}
+
 // Content-Disposition is always attachment, so a stored file never renders in the browser.
 function contentDisposition(name) {
   return `attachment; filename="${asciiFallback(name)}"; filename*=UTF-8''${encodeFilenameStar(name)}`;
@@ -499,16 +535,23 @@ async function streamFile(ctx, { file, res: upstream }, { disposition, extra = {
   body.pipe(ctx.res);
 }
 
-// Inline display. Only previewable types reach here (see isPreviewable). The sandbox policy stops a previewed file
-// from running script or reaching the page. The frame is same-origin only, so the dashboard can embed it.
+// Inline display. Only previewable types reach here (see isPreviewable). The sandbox policy stops a previewed
+// file from running script or reaching the page. The frame is same-origin only, so the dashboard can embed it.
 // PDF needs the browser's built-in viewer, which the sandbox policy would block, so PDF gets a narrower policy.
+// Video and audio get media-src 'self' so a browser tab (or an embed) may play them.
+const MEDIA_PREVIEW_EXTS = new Set(['.mp4', '.webm', '.mov', '.mkv', '.mp3', '.wav', '.ogg', '.m4a']);
+
 function previewHeaders(name) {
-  const pdf = extensionOf(name) === '.pdf';
+  const ext = extensionOf(name);
+  const pdf = ext === '.pdf';
+  const media = MEDIA_PREVIEW_EXTS.has(ext);
   return {
     'X-Frame-Options': 'SAMEORIGIN',
     'Content-Security-Policy': pdf
       ? "default-src 'none'; object-src 'self'; frame-ancestors 'self'"
-      : "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; sandbox",
+      : media
+        ? "default-src 'none'; media-src 'self'; img-src 'self'; sandbox"
+        : "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; sandbox",
   };
 }
 
@@ -805,6 +848,7 @@ const ROUTES = [
   { method: 'GET', path: '/', handler: pageHome },
   { method: 'GET', path: '/home', handler: pageAppHome },
   { method: 'GET', path: '/explore', handler: pageExplore },
+  { method: 'GET', pattern: /^\/assets\/([A-Za-z0-9][A-Za-z0-9._-]*)$/, handler: serveAsset, keys: ['name'] },
   { method: 'GET', path: '/api/health', handler: apiHealth },
   { method: 'GET', path: '/login', handler: pageAuthForm('login') },
   { method: 'GET', path: '/signup', handler: pageAuthForm('signup') },
