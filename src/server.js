@@ -11,6 +11,26 @@ const pages = require('./pages');
 
 const MAX_BODY_BYTES = 16 * 1024;
 
+// CORS applies to /api/ only. Each allowed origin must be listed exactly (scheme://host[:port], no path, no
+// trailing slash). Never "*": the API uses cookies, and browsers refuse credentials with a wildcard anyway.
+function parseCorsOrigins(value) {
+  const list = (value || '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (const origin of list) {
+    let parsed = null;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      parsed = null;
+    }
+    const secure = parsed && parsed.protocol === 'https:';
+    const local = parsed && parsed.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(parsed.hostname);
+    if (!parsed || parsed.origin !== origin || !(secure || local)) {
+      throw new Error('CORS_ALLOWED_ORIGINS has an invalid entry. Use https://host[:port] with no path or trailing slash.');
+    }
+  }
+  return list;
+}
+
 // Login needs three settings. Without them the site still serves its public pages, and auth routes report
 // which setting is missing (names only, never values).
 function buildAuth(env, overrides = {}) {
@@ -62,9 +82,10 @@ function clientIp(req, auth) {
 }
 
 // Browsers send Origin on cross-site POST requests. Refuse them when the origin is not this host.
-function sameOrigin(req) {
+function sameOrigin(req, corsOrigins) {
   const origin = req.headers.origin;
   if (origin === undefined) return true;
+  if (corsOrigins.includes(origin)) return true;
   try {
     return new URL(origin).host === req.headers.host;
   } catch {
@@ -253,10 +274,28 @@ async function handleError(ctx, err) {
   return fail(ctx, 500, 'INTERNAL_ERROR', 'Something went wrong.');
 }
 
-async function dispatch(req, res, auth) {
+async function dispatch(req, res, auth, corsOrigins) {
   const url = new URL(req.url || '/', 'http://localhost');
   const ctx = { req, res, url, auth, ip: clientIp(req, auth) };
   const method = req.method === 'HEAD' ? 'GET' : req.method;
+
+  const isApi = url.pathname.startsWith('/api/');
+  const origin = req.headers.origin;
+  const corsAllowed = isApi && typeof origin === 'string' && corsOrigins.includes(origin);
+  if (isApi) res.setHeader('Vary', 'Origin');
+  if (corsAllowed) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+  if (isApi && method === 'OPTIONS') {
+    // Preflight. Without an allowed origin there are no CORS headers, so the browser blocks the request.
+    if (corsAllowed) {
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Max-Age', '600');
+    }
+    return send(res, 204, {}, '');
+  }
 
   const candidates = ROUTES.filter((r) => r.path === url.pathname);
   const route = candidates.find((r) => r.method === method);
@@ -268,7 +307,7 @@ async function dispatch(req, res, auth) {
     return sendJson(ctx.res, 405, { error: 'Method not allowed' }, { Allow: [...methods].sort().join(', ') });
   }
 
-  if (method !== 'GET' && !sameOrigin(req)) {
+  if (method !== 'GET' && !sameOrigin(req, corsOrigins)) {
     return fail(ctx, 403, 'CROSS_SITE_REFUSED', 'Cross-site requests are refused.');
   }
 
@@ -280,9 +319,11 @@ async function dispatch(req, res, auth) {
 }
 
 function createServer(options = {}) {
-  const auth = buildAuth(options.env || process.env, options);
+  const env = options.env || process.env;
+  const auth = buildAuth(env, options);
+  const corsOrigins = parseCorsOrigins(env.CORS_ALLOWED_ORIGINS);
   return http.createServer((req, res) => {
-    dispatch(req, res, auth).catch((err) => {
+    dispatch(req, res, auth, corsOrigins).catch((err) => {
       console.error(`Unhandled error: ${err && err.name}`);
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end();
@@ -296,9 +337,11 @@ if (require.main === module) {
     console.warn(`Login is disabled. Missing configuration: ${auth.missing.join(', ')}`);
   }
   const port = Number(process.env.PORT) || 3000;
+  const corsCount = parseCorsOrigins(process.env.CORS_ALLOWED_ORIGINS).length;
+  if (corsCount) console.log(`CORS allowed for ${corsCount} origin(s) on /api/`);
   createServer().listen(port, '0.0.0.0', () => {
     console.log(`Listening on port ${port}`);
   });
 }
 
-module.exports = { createServer, buildAuth };
+module.exports = { createServer, buildAuth, parseCorsOrigins };
