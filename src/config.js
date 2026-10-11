@@ -31,4 +31,29 @@ function loadAuthConfig(env = process.env) {
   };
 }
 
-module.exports = { loadAuthConfig };
+const OWNER_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+// Dot-only names such as ".." would become path segments in API URLs, so they are refused.
+const STORAGE_REPO_RE = /^(?!\.+$)[A-Za-z0-9._-]{1,100}$/;
+
+// File storage needs two more settings. GITHUB_TOKEN (already required for login) must be able to read and write
+// the storage repository. Missing settings disable file routes only; the login pages keep working.
+function loadFileConfig(env = process.env, { privateDataRepo } = {}) {
+  const value = (name) => (env[name] || '').trim();
+  const missing = [];
+  if (!value('GITHUB_OWNER')) missing.push('GITHUB_OWNER');
+  if (!value('GITHUB_STORAGE_REPO')) missing.push('GITHUB_STORAGE_REPO');
+  if (missing.length) return { ok: false, missing };
+
+  if (!OWNER_RE.test(value('GITHUB_OWNER'))) return { ok: false, missing: ['GITHUB_OWNER (not a valid owner name)'] };
+  if (!STORAGE_REPO_RE.test(value('GITHUB_STORAGE_REPO'))) {
+    return { ok: false, missing: ['GITHUB_STORAGE_REPO (not a valid repository name)'] };
+  }
+  const repo = `${value('GITHUB_OWNER')}/${value('GITHUB_STORAGE_REPO')}`;
+  // File bytes and account data stay in separate repositories.
+  if (privateDataRepo && repo.toLowerCase() === privateDataRepo.toLowerCase()) {
+    return { ok: false, missing: ['GITHUB_STORAGE_REPO (must differ from PRIVATE_DATA_REPO)'] };
+  }
+  return { ok: true, config: { storageRepo: repo } };
+}
+
+module.exports = { loadAuthConfig, loadFileConfig };

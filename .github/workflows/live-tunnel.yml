@@ -88,6 +88,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
       - name: Run tests
         run: npm test
 
@@ -105,6 +108,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          # File storage settings. Repository variables (not secrets). GitHub reserves the GITHUB_ prefix for
+          # variable names, so the variables are FILE_STORAGE_*. Without them, login still works and files are disabled.
+          GITHUB_OWNER: ${{ vars.FILE_STORAGE_OWNER }}
+          GITHUB_STORAGE_REPO: ${{ vars.FILE_STORAGE_REPO }}
         run: |
           set -uo pipefail
           # Config comes from the environment only. The app never logs secret values.

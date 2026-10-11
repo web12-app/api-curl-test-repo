@@ -130,4 +130,42 @@ async function loadUser(storage, userId) {
   }
 }
 
-module.exports = { signup, login, loadUser, PASSWORD_MIN, PASSWORD_MAX };
+// The stored account record ({ data, sha }), or null. Used by the session check, which also reads
+// sessions_valid_after from it.
+async function loadAccountRecord(storage, userId) {
+  try {
+    return await storage.readJson(userPath(userId));
+  } catch (err) {
+    if (err instanceof TypeError || /invalid user id/.test(err.message)) return null;
+    throw err;
+  }
+}
+
+// The revocation floor for an account: sessions with iat at or before it are refused. 0 if never revoked.
+async function sessionsValidAfter(storage, userId) {
+  const record = await loadAccountRecord(storage, userId);
+  const value = record && record.data.sessions_valid_after;
+  return typeof value === 'number' ? value : 0;
+}
+
+// Logout: every session issued at or before now stops working, in every browser. Sessions created later
+// (a new login) carry a newer iat and still work. Not retried: a conflict is reported to the caller.
+async function revokeSessions(storage, userId, nowMs) {
+  const record = await loadAccountRecord(storage, userId);
+  if (!record) return false;
+  const next = { ...record.data, sessions_valid_after: nowMs };
+  await storage.updateJson(userPath(userId), next, record.sha, `Revoke sessions for ${userId}`);
+  return true;
+}
+
+module.exports = {
+  signup,
+  login,
+  loadUser,
+  loadAccountRecord,
+  sessionsValidAfter,
+  revokeSessions,
+  publicUser,
+  PASSWORD_MIN,
+  PASSWORD_MAX,
+};
