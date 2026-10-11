@@ -21,6 +21,7 @@ function dashboardClient() {
   var drop = document.getElementById('drop');
   var pickBtn = document.getElementById('pick');
   var searchTimer = null;
+  var preview = document.getElementById('preview');
 
   function el(tag, props, children) {
     var node = document.createElement(tag);
@@ -67,7 +68,10 @@ function dashboardClient() {
       el('button', { type: 'button', className: 'linklike', text: 'Dismiss', onclick: function () { box.remove(); } }),
     ]);
     notices.appendChild(box);
-    if (kind === 'success') setTimeout(function () { if (box.parentNode) box.remove(); }, 6000);
+    // Keep the stack short, so old messages do not pile up over the list.
+    while (notices.children.length > 4) notices.removeChild(notices.firstChild);
+    // Messages go away on their own, so they do not stay over the list.
+    setTimeout(function () { if (box.parentNode) box.remove(); }, kind === 'success' ? 6000 : 10000);
   }
 
   async function api(url, options) {
@@ -90,9 +94,7 @@ function dashboardClient() {
   }
 
   function renderQuota(q) {
-    quotaEl.textContent = '';
-    quotaEl.appendChild(el('span', { text: fmtSize(q.usedBytes) + ' of ' + fmtSize(q.limitBytes) + ' used · ' + q.count + ' of ' + q.maxFiles + ' files' }));
-    quotaEl.appendChild(el('progress', { max: String(q.limitBytes), value: String(q.usedBytes), 'aria-label': 'Storage used' }));
+    quotaEl.textContent = fmtSize(q.usedBytes) + ' used · ' + q.count + ' of ' + q.maxFiles + ' files';
   }
 
   function deleteButton(file) {
@@ -105,21 +107,93 @@ function dashboardClient() {
     });
   }
 
+  // Preview covers the same types the server allows inline. The server checks again; this only avoids a
+  // pointless request.
+  var PREVIEW_EXT = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.txt', '.csv', '.json'];
+  function canPreview(name) {
+    var dot = name.lastIndexOf('.');
+    return dot >= 0 && PREVIEW_EXT.indexOf(name.slice(dot).toLowerCase()) !== -1;
+  }
+
+  function openPreview(file) {
+    var frame = document.getElementById('preview-frame');
+    document.getElementById('preview-title').textContent = file.name;
+    frame.setAttribute('src', '/api/files/' + file.id + '/preview');
+    frame.setAttribute('title', 'Preview of ' + file.name);
+    if (typeof preview.showModal === 'function') preview.showModal();
+    else preview.setAttribute('open', '');
+  }
+
+  function closePreview() {
+    if (typeof preview.close === 'function') preview.close();
+    else preview.removeAttribute('open');
+    document.getElementById('preview-frame').setAttribute('src', 'about:blank');
+  }
+
+  function copyText(text, input) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        function () { notify('success', 'Link copied.'); },
+        function () { input.select(); notify('error', 'Copy failed. The link is selected; copy it by hand.'); }
+      );
+      return;
+    }
+    input.select();
+    notify('success', 'The link is selected. Press Ctrl+C to copy.');
+  }
+
+  // Share link box, shown only for public files. The full link is built from this page's origin; the server
+  // gives only the path.
+  function shareBox(file) {
+    var url = window.location.origin + file.sharePath;
+    var input = el('input', { type: 'text', readonly: 'readonly', value: url, 'aria-label': 'Share link for ' + file.name });
+    input.value = url;
+    return el('div', { className: 'share-box' }, [
+      input,
+      el('button', { type: 'button', text: 'Copy link', onclick: function () { copyText(url, input); } }),
+      el('a', { className: 'button', href: file.sharePath, target: '_blank', rel: 'noopener', text: 'Open' }),
+    ]);
+  }
+
+  async function setSharing(file, makePublic) {
+    var result = await api('/api/files/' + file.id + '/sharing', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public: makePublic }),
+    });
+    if (result.ok) notify('success', makePublic ? file.name + ' is now shared. Anyone with the link can open it.' : file.name + ' is private again. The old link no longer works.');
+    else notify('error', 'Could not change sharing for ' + file.name + ': ' + messageOf(result), result.status === 401);
+    loadFiles();
+  }
+
   function renderFiles(files) {
     tbody.textContent = '';
     files.forEach(function (file) {
       var nameCell = el('td', { 'data-label': 'Name' }, [file.name]);
+      nameCell.appendChild(el('span', { className: 'badge' + (file.visibility === 'public' ? ' public' : ''), text: file.visibility === 'public' ? 'Public' : 'Private' }));
       if (file.status === 'deleting') nameCell.appendChild(el('span', { className: 'badge', text: 'Deleting…' }));
+      var buttons = [];
+      if (canPreview(file.name)) {
+        buttons.push(el('button', { type: 'button', text: 'Preview', 'aria-label': 'Preview ' + file.name, onclick: function () { openPreview(file); } }));
+      }
+      buttons.push(el('a', { className: 'button', href: '/api/files/' + file.id + '/download', download: file.name, text: 'Download' }));
+      if (file.status !== 'deleting') {
+        buttons.push(el('button', {
+          type: 'button',
+          text: file.visibility === 'public' ? 'Stop sharing' : 'Share',
+          'aria-label': (file.visibility === 'public' ? 'Stop sharing ' : 'Share ') + file.name,
+          onclick: function () { setSharing(file, file.visibility !== 'public'); },
+        }));
+      }
+      buttons.push(deleteButton(file));
+      var actionsCell = el('td', { 'data-label': 'Actions', className: 'actions' }, [el('div', { className: 'stack' }, buttons)]);
+      if (file.visibility === 'public' && file.sharePath) actionsCell.appendChild(shareBox(file));
       var row = el('tr', null, [
         nameCell,
         el('td', { 'data-label': 'Type', text: file.type.split(';')[0] }),
         el('td', { 'data-label': 'Size', text: fmtSize(file.size) }),
         el('td', { 'data-label': 'Uploaded', text: fmtDate(file.uploadedAt) }),
-        el('td', { 'data-label': 'Actions', className: 'actions' }, [
-          el('a', { className: 'button', href: '/api/files/' + file.id + '/download', download: file.name, text: 'Download' }),
-          ' ',
-          deleteButton(file),
-        ]),
+        actionsCell,
       ]);
       tbody.appendChild(row);
     });
@@ -270,6 +344,8 @@ function dashboardClient() {
     searchTimer = setTimeout(loadFiles, 300);
   });
   category.addEventListener('change', loadFiles);
+  document.getElementById('preview-close').addEventListener('click', closePreview);
+  preview.addEventListener('close', function () { document.getElementById('preview-frame').setAttribute('src', 'about:blank'); });
 
   loadFiles();
 }

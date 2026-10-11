@@ -10,9 +10,9 @@ const { GitHubReleases } = require('./github-releases');
 const { RateLimiter } = require('./rate-limit');
 const { signup, login, loadUser, loadAccountRecord, sessionsValidAfter, revokeSessions, publicUser } = require('./accounts');
 const { COOKIE_NAME, createSession, readSession, parseCookies, sessionCookie, clearSessionCookie } = require('./session');
-const { FileService } = require('./files');
+const { FileService, SHARE_TOKEN_RE } = require('./files');
 const { receiveUpload, removeFile } = require('./upload');
-const { TYPES, ALLOWED_EXTENSIONS, CATEGORIES, sanitizeFilename, extensionOf, asciiFallback, encodeFilenameStar, contentMatches } = require('./file-types');
+const { TYPES, ALLOWED_EXTENSIONS, CATEGORIES, sanitizeFilename, extensionOf, asciiFallback, encodeFilenameStar, contentMatches, isPreviewable } = require('./file-types');
 const pages = require('./pages');
 
 const MAX_BODY_BYTES = 16 * 1024;
@@ -420,32 +420,127 @@ function contentDisposition(name) {
   return `attachment; filename="${asciiFallback(name)}"; filename*=UTF-8''${encodeFilenameStar(name)}`;
 }
 
-async function apiDownloadFile(ctx) {
-  const service = requireFileStorage(ctx);
-  const user = await requireUser(ctx);
-  const { file, res: upstream } = await service.download(user.id, ctx.params.id);
-
+// Streams one stored file to the response. The stored size is checked against the record first, so a mismatch
+// is an error and not a truncated file. HEAD sends the headers only.
+async function streamFile(ctx, { file, res: upstream }, { disposition, extra = {} }) {
   const length = upstream.headers.get('content-length');
   if (!upstream.body || (length !== null && Number(length) !== file.size)) {
     await upstream.body?.cancel?.().catch(() => {});
     throw new StorageError('The stored file did not match its record.');
   }
+  const headers = { ...securityHeaders(), 'Content-Type': file.type, 'Content-Length': String(file.size), ...extra };
+  if (disposition) headers['Content-Disposition'] = disposition;
   if (ctx.req.method === 'HEAD') {
     await upstream.body.cancel().catch(() => {});
-    ctx.res.writeHead(200, { ...securityHeaders(), 'Content-Type': file.type, 'Content-Length': String(file.size) });
+    ctx.res.writeHead(200, headers);
     ctx.res.end();
     return;
   }
-  ctx.res.writeHead(200, {
-    ...securityHeaders(),
-    'Content-Type': file.type,
-    'Content-Length': String(file.size),
-    'Content-Disposition': contentDisposition(file.name),
-  });
+  ctx.res.writeHead(200, headers);
   const body = Readable.fromWeb(upstream.body);
   body.on('error', () => ctx.res.destroy());
   ctx.res.on('close', () => body.destroy());
   body.pipe(ctx.res);
+}
+
+// Inline display. Only previewable types reach here (see isPreviewable). The sandbox policy stops a previewed file
+// from running script or reaching the page. The frame is same-origin only, so the dashboard can embed it.
+// PDF needs the browser's built-in viewer, which the sandbox policy would block, so PDF gets a narrower policy.
+function previewHeaders(name) {
+  const pdf = extensionOf(name) === '.pdf';
+  return {
+    'X-Frame-Options': 'SAMEORIGIN',
+    'Content-Security-Policy': pdf
+      ? "default-src 'none'; object-src 'self'; frame-ancestors 'self'"
+      : "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; sandbox",
+  };
+}
+
+const previewDisposition = (name) => `inline; filename="${asciiFallback(name)}"; filename*=UTF-8''${encodeFilenameStar(name)}`;
+
+async function apiDownloadFile(ctx) {
+  const service = requireFileStorage(ctx);
+  const user = await requireUser(ctx);
+  const opened = await service.download(user.id, ctx.params.id);
+  await streamFile(ctx, opened, { disposition: contentDisposition(opened.file.name) });
+}
+
+async function apiPreviewFile(ctx) {
+  const service = requireFileStorage(ctx);
+  const user = await requireUser(ctx);
+  const entry = await service.readReady(user.id, ctx.params.id);
+  if (!isPreviewable(entry.name)) {
+    throw new AppError(415, 'PREVIEW_NOT_AVAILABLE', 'This file type cannot be previewed. Download it instead.');
+  }
+  const opened = await service.openEntry(entry);
+  await streamFile(ctx, opened, {
+    disposition: previewDisposition(entry.name),
+    extra: previewHeaders(entry.name),
+  });
+}
+
+// Turns sharing on or off. The body must be {"public": true} or {"public": false}.
+async function apiSetSharing(ctx) {
+  const service = requireFileStorage(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  if (!body || typeof body.public !== 'boolean') {
+    throw new AppError(400, 'INVALID_BODY', 'Send {"public": true} or {"public": false}.');
+  }
+  const { file } = await service.setSharing(user.id, ctx.params.id, body.public);
+  ok(ctx, 200, { file });
+}
+
+// ---- public share links. No login. Anyone with the link can read the file it names, and nothing else.
+
+const SHARE_WINDOW_MS = 15 * 60 * 1000;
+const SHARE_REQUESTS_PER_WINDOW = 300; // per client address; the 256-bit token already makes guessing impractical
+
+function shareRateLimit(ctx) {
+  const key = `share:${ctx.ip}`;
+  if (ctx.auth.limiter.count(key, SHARE_WINDOW_MS) >= SHARE_REQUESTS_PER_WINDOW) {
+    throw new AppError(429, 'RATE_LIMITED', 'Too many requests. Try again later.');
+  }
+  ctx.auth.limiter.record(key);
+}
+
+const SHARE_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'";
+
+async function pageShare(ctx) {
+  const service = requireFileStorage(ctx);
+  shareRateLimit(ctx);
+  const token = ctx.params.id;
+  const found = await service.resolveShare(token);
+  if (!found) throw new AppError(404, 'NOT_FOUND', 'This link is not available.');
+  const e = found.entry;
+  sendHtml(
+    ctx.res,
+    200,
+    pages.sharePage({ name: e.name, size: e.size, type: e.type, previewable: isPreviewable(e.name) }, token),
+    { 'Content-Security-Policy': SHARE_PAGE_CSP },
+  );
+}
+
+async function shareDownload(ctx) {
+  const service = requireFileStorage(ctx);
+  shareRateLimit(ctx);
+  const opened = await service.downloadShared(ctx.params.id);
+  await streamFile(ctx, opened, { disposition: contentDisposition(opened.file.name) });
+}
+
+async function sharePreview(ctx) {
+  const service = requireFileStorage(ctx);
+  shareRateLimit(ctx);
+  const found = await service.resolveShare(ctx.params.id);
+  if (!found || !isPreviewable(found.entry.name)) {
+    throw new AppError(404, 'NOT_FOUND', 'This link is not available.');
+  }
+  const opened = await service.openEntry(found.entry);
+  await streamFile(ctx, opened, {
+    disposition: previewDisposition(found.entry.name),
+    extra: previewHeaders(found.entry.name),
+  });
 }
 
 async function apiDeleteFile(ctx) {
@@ -474,6 +569,11 @@ const ROUTES = [
   { method: 'POST', path: '/api/files/upload', handler: apiUploadFile },
   { method: 'GET', pattern: new RegExp(`^/api/files/${FILE_ID}/download$`), handler: apiDownloadFile },
   { method: 'DELETE', pattern: new RegExp(`^/api/files/${FILE_ID}$`), handler: apiDeleteFile },
+  { method: 'GET', pattern: new RegExp(`^/api/files/${FILE_ID}/preview$`), handler: apiPreviewFile },
+  { method: 'PUT', pattern: new RegExp(`^/api/files/${FILE_ID}/sharing$`), handler: apiSetSharing },
+  { method: 'GET', pattern: new RegExp(`^/s/(${SHARE_TOKEN_RE.source.slice(1, -1)})$`), handler: pageShare },
+  { method: 'GET', pattern: new RegExp(`^/s/(${SHARE_TOKEN_RE.source.slice(1, -1)})/download$`), handler: shareDownload },
+  { method: 'GET', pattern: new RegExp(`^/s/(${SHARE_TOKEN_RE.source.slice(1, -1)})/preview$`), handler: sharePreview },
 ];
 
 // Returns every route whose path matches, with any path parameters.
@@ -532,7 +632,7 @@ async function dispatch(req, res, auth, corsOrigins) {
   if (isApi && method === 'OPTIONS') {
     // Preflight. Without an allowed origin there are no CORS headers, so the browser blocks the request.
     if (corsAllowed) {
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
       res.setHeader('Access-Control-Max-Age', '600');
     }

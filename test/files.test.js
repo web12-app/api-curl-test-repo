@@ -519,17 +519,17 @@ test('uploads are refused when the storage repository is not private', async () 
   });
 });
 
-test('uploads beyond the per-user quota are refused', async () => {
-  await withApp({ limits: { userQuotaBytes: 1500, maxFileBytes: 1000 } }, async (app) => {
+test('there is no total storage limit: many files past the old 200 MB quota are accepted', async () => {
+  await withApp({ limits: { maxFileBytes: 1000 } }, async (app) => {
     const user = await signup(app);
-    const first = await upload(app, user.cookie, 'one.txt', 'x'.repeat(1000));
-    assert.equal(first.res.status, 201);
-    const second = await upload(app, user.cookie, 'two.txt', 'x'.repeat(600));
-    assert.equal(second.res.status, 507);
-    assert.equal(second.body.error.code, 'QUOTA_EXCEEDED');
+    for (const name of ['a.txt', 'b.txt', 'c.txt']) {
+      const r = await upload(app, user.cookie, name, 'x'.repeat(1000));
+      assert.equal(r.res.status, 201, name);
+    }
     const { data } = await listFiles(app, user.cookie);
-    assert.equal(data.quota.usedBytes, 1000);
-    assert.equal(data.quota.limitBytes, 1500);
+    assert.equal(data.quota.usedBytes, 3000);
+    assert.equal(data.quota.limitBytes, undefined, 'no limit is reported');
+    assert.equal(data.files.length, 3);
   });
 });
 
@@ -698,3 +698,187 @@ test('uploads are capped in flight, and an abandoned upload frees its slot', asy
     assert.equal(storedAssets().length, 1, 'the abandoned upload stored nothing');
   });
 });
+
+// ---- preview
+
+test('preview: an owner sees a previewable file inline with a sandboxed policy; other types are refused', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('pixels')]);
+    const { body } = await upload(app, user.cookie, 'pic.png', png, { type: 'image/png' });
+    const res = await authed(app, user.cookie, `/api/files/${body.data.file.id}/preview`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(Buffer.from(await res.arrayBuffer()), png);
+    assert.equal(res.headers.get('content-type'), 'image/png');
+    assert.match(res.headers.get('content-disposition'), /^inline;/);
+    assert.equal(res.headers.get('x-frame-options'), 'SAMEORIGIN', 'the dashboard can frame it, other sites cannot');
+    assert.match(res.headers.get('content-security-policy'), /sandbox/);
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+
+    const zip = await upload(app, user.cookie, 'bundle.zip', Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3]), { type: 'application/zip' });
+    const refused = await authed(app, user.cookie, `/api/files/${zip.body.data.file.id}/preview`);
+    assert.equal(refused.status, 415);
+    assert.equal((await refused.json()).error.code, 'PREVIEW_NOT_AVAILABLE');
+  });
+});
+
+// ---- sharing
+
+const putSharing = (app, cookie, id, makePublic) =>
+  authed(app, cookie, `/api/files/${id}/sharing`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ public: makePublic }),
+  });
+
+test('sharing: private by default; a link works without login; turning it off ends the link', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const bytes = 'shared bytes\n';
+    const { body } = await upload(app, user.cookie, 'report.txt', bytes);
+    const id = body.data.file.id;
+    let { data } = await listFiles(app, user.cookie);
+    assert.equal(data.files[0].visibility, 'private');
+    assert.equal(data.files[0].sharePath, null);
+
+    const on = await putSharing(app, user.cookie, id, true);
+    assert.equal(on.status, 200);
+    const sharePath = (await on.json()).data.file.sharePath;
+    assert.match(sharePath, /^\/s\/[A-Za-z0-9_-]{43}$/);
+    const token = sharePath.slice(3);
+
+    // No cookie and no Origin: the link stands on its own.
+    const dl = await fetch(`${app.base}/s/${token}/download`);
+    assert.equal(dl.status, 200);
+    assert.equal(await dl.text(), bytes);
+    assert.match(dl.headers.get('content-disposition'), /^attachment;/);
+
+    const page = await fetch(`${app.base}/s/${token}`);
+    assert.equal(page.status, 200);
+    const html = await page.text();
+    assert.match(html, /report\.txt/);
+    assert.doesNotMatch(html, /api\.github|upload-|releases|assets|ghp_/i, 'no storage details on the public page');
+
+    const off = await putSharing(app, user.cookie, id, false);
+    assert.equal(off.status, 200);
+    assert.equal((await fetch(`${app.base}/s/${token}/download`)).status, 404);
+    assert.equal((await fetch(`${app.base}/s/${token}`)).status, 404);
+    ({ data } = await listFiles(app, user.cookie));
+    assert.equal(data.files[0].visibility, 'private');
+  });
+});
+
+test('sharing: turning it on again makes a new link, and the old link stays dead', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'a.txt', 'hello');
+    const id = body.data.file.id;
+    const first = (await (await putSharing(app, user.cookie, id, true)).json()).data.file.sharePath.slice(3);
+    // Turning it on while already on keeps the same link.
+    const again = (await (await putSharing(app, user.cookie, id, true)).json()).data.file.sharePath.slice(3);
+    assert.equal(again, first);
+    await putSharing(app, user.cookie, id, false);
+    const second = (await (await putSharing(app, user.cookie, id, true)).json()).data.file.sharePath.slice(3);
+    assert.notEqual(second, first);
+    assert.equal((await fetch(`${app.base}/s/${first}/download`)).status, 404, 'the old link is dead');
+    assert.equal(await (await fetch(`${app.base}/s/${second}/download`)).text(), 'hello');
+  });
+});
+
+test('sharing: deleting a shared file ends its link', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'gone.txt', 'soon gone');
+    const id = body.data.file.id;
+    const token = (await (await putSharing(app, user.cookie, id, true)).json()).data.file.sharePath.slice(3);
+    assert.equal(await (await fetch(`${app.base}/s/${token}/download`)).text(), 'soon gone');
+    const del = await authed(app, user.cookie, `/api/files/${id}`, { method: 'DELETE' });
+    assert.equal(del.status, 200);
+    assert.equal((await fetch(`${app.base}/s/${token}/download`)).status, 404);
+  });
+});
+
+test('sharing: a share link keeps working after a process restart', async () => {
+  const first = await startApp({});
+  const user = await signup(first);
+  const { body } = await upload(first, user.cookie, 'keep.txt', 'kept across restart');
+  const token = (await (await putSharing(first, user.cookie, body.data.file.id, true)).json()).data.file.sharePath.slice(3);
+  await first.close();
+
+  const second = await startApp({});
+  try {
+    const res = await fetch(`${second.base}/s/${token}/download`);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), 'kept across restart');
+  } finally {
+    await second.close();
+  }
+});
+
+test('sharing and preview are owner-only: another user gets 404 and cannot change the file', async () => {
+  await withApp({}, async (app) => {
+    const alice = await signup(app);
+    const bob = await signup(app);
+    const { body } = await upload(app, alice.cookie, 'alice.txt', 'alice only');
+    const id = body.data.file.id;
+    assert.equal((await putSharing(app, bob.cookie, id, true)).status, 404);
+    assert.equal((await authed(app, bob.cookie, `/api/files/${id}/preview`)).status, 404);
+    const { data } = await listFiles(app, alice.cookie);
+    assert.equal(data.files[0].visibility, 'private', 'bob could not make it public');
+  });
+});
+
+test('sharing: needs a session and the X-Requested-With header', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'a.txt', 'x');
+    const id = body.data.file.id;
+    const noSession = await fetch(`${app.base}/api/files/${id}/sharing`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: app.base },
+      body: JSON.stringify({ public: true }),
+    });
+    assert.equal(noSession.status, 401);
+    const noHeader = await fetch(`${app.base}/api/files/${id}/sharing`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Origin: app.base, Cookie: user.cookie },
+      body: JSON.stringify({ public: true }),
+    });
+    assert.equal(noHeader.status, 403);
+    assert.equal((await noHeader.json()).error.code, 'CSRF_HEADER_REQUIRED');
+  });
+});
+
+test('sharing: a bad body is refused, and unknown or malformed links are 404', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'a.txt', 'x');
+    const id = body.data.file.id;
+    const bad = await authed(app, user.cookie, `/api/files/${id}/sharing`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public: 'yes' }),
+    });
+    assert.equal(bad.status, 400);
+    assert.equal((await bad.json()).error.code, 'INVALID_BODY');
+
+    // A never-shared file has no link, and a made-up token matches nothing.
+    assert.equal((await fetch(`${app.base}/s/${'A'.repeat(43)}/download`)).status, 404);
+    assert.equal((await fetch(`${app.base}/s/short/download`)).status, 404);
+    assert.equal((await fetch(`${app.base}/s/${'A'.repeat(43)}`)).status, 404);
+  });
+});
+
+test('shared preview is inline and sandboxed, and only for previewable types', async () => {
+  await withApp({}, async (app) => {
+    const user = await signup(app);
+    const { body } = await upload(app, user.cookie, 'note.txt', 'preview me');
+    const token = (await (await putSharing(app, user.cookie, body.data.file.id, true)).json()).data.file.sharePath.slice(3);
+    const res = await fetch(`${app.base}/s/${token}/preview`);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), 'preview me');
+    assert.match(res.headers.get('content-disposition'), /^inline;/);
+    assert.match(res.headers.get('content-security-policy'), /sandbox/);
+  });
+});
+

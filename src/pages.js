@@ -40,6 +40,18 @@ const BASE_CSS = `
 // Dashboard styles: a wider page, a table that turns into cards on small screens, and the upload area.
 const DASHBOARD_CSS = `
       [hidden] { display: none !important; }
+      .badge { display: inline-block; margin-left: .4rem; padding: .05rem .45rem; border-radius: 999px; font-size: .75rem; background: #eef2f6; color: #24292f; vertical-align: middle; }
+      .badge.public { background: #dafbe1; color: #116329; }
+      .share-box { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin-top: .4rem; }
+      .share-box input { flex: 1 1 16rem; min-width: 0; font-size: .85rem; }
+      .actions .stack { display: flex; flex-wrap: wrap; gap: .35rem; }
+      dialog.preview { width: min(960px, 96vw); height: 85vh; padding: 0; border: 1px solid #d0d7de; border-radius: 8px; }
+      dialog.preview::backdrop { background: rgba(0, 0, 0, .5); }
+      dialog.preview[open] { display: flex; flex-direction: column; }
+      .preview-bar { display: flex; justify-content: space-between; align-items: center; gap: .5rem; padding: .5rem .75rem; border-bottom: 1px solid #d0d7de; }
+      .preview-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #preview-frame { flex: 1; width: 100%; border: 0; background: #f6f8fa; }
+      .share-preview { width: 100%; height: 60vh; border: 1px solid #d0d7de; border-radius: 8px; background: #f6f8fa; }
       body.wide { max-width: 64rem; }
       .profile { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 1rem; align-items: flex-end; }
       .profile h1 { margin: .5rem 0 0; font-size: 1.6rem; }
@@ -61,7 +73,8 @@ const DASHBOARD_CSS = `
       table.files td.actions { white-space: nowrap; }
       .badge { display: inline-block; margin-left: .5rem; padding: 0 .4rem; border-radius: 999px; background: #fff8c5; font-size: .8rem; }
       .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-      .notices { position: fixed; right: 1rem; bottom: 1rem; display: flex; flex-direction: column; gap: .5rem; max-width: min(24rem, calc(100vw - 2rem)); z-index: 10; }
+      .notices { position: fixed; right: 1rem; bottom: 1rem; display: flex; flex-direction: column; gap: .5rem; max-width: min(24rem, calc(100vw - 2rem)); z-index: 10; pointer-events: none; }
+      .notices > * { pointer-events: auto; }
       .notice { padding: .6rem .8rem; border-radius: 6px; background: #fff; border: 1px solid #d0d7de; box-shadow: 0 2px 8px rgba(31,35,40,.15); display: flex; justify-content: space-between; gap: .75rem; }
       .notice.success { border-color: #1a7f37; }
       .notice.error { border-color: #cf222e; color: #82071e; }
@@ -192,9 +205,35 @@ function dashboardPage(user, { filesEnabled = false, maxBytes = 0, allowed = [] 
          <tbody></tbody>
        </table>
      </section>
+     <dialog id="preview" class="preview" aria-labelledby="preview-title">
+       <div class="preview-bar">
+         <span id="preview-title"></span>
+         <button type="button" id="preview-close">Close</button>
+       </div>
+       <iframe id="preview-frame" title="File preview"></iframe>
+     </dialog>
      ${config}
      <script>(${dashboardClient.toString()})();</script>`,
     user,
+    { wide: true, extraCss: DASHBOARD_CSS },
+  );
+}
+
+// Public page for a share link. Only the file's name, size, and type, plus a preview and a download link. It
+// never shows a GitHub name, tag, or asset. The token is URL-safe, and every value is escaped.
+function sharePage({ name, size, type, previewable }, token) {
+  const mb = size >= 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MB` : size >= 1024 ? `${(size / 1024).toFixed(1)} KB` : `${size} B`;
+  const t = escapeHtml(token);
+  const preview = previewable
+    ? `<iframe class="share-preview" src="/s/${t}/preview" title="Preview of ${escapeHtml(name)}"></iframe>`
+    : '<p>This file type cannot be previewed.</p>';
+  return layout(
+    escapeHtml(name),
+    `<h1>Shared file</h1>
+     <p><strong>${escapeHtml(name)}</strong> · ${escapeHtml(mb)} · ${escapeHtml(type.split(';')[0])}</p>
+     ${preview}
+     <p><a class="button" href="/s/${t}/download" download>Download</a></p>`,
+    null,
     { wide: true, extraCss: DASHBOARD_CSS },
   );
 }
@@ -203,4 +242,4 @@ function errorPage(status, message, user = null) {
   return layout(`Error ${status}`, `<h1>Error ${status}</h1><p class="error">${escapeHtml(message)}</p>`, user);
 }
 
-module.exports = { escapeHtml, errorText, homePage, authForm, dashboardPage, errorPage };
+module.exports = { escapeHtml, errorText, homePage, authForm, dashboardPage, sharePage, errorPage };

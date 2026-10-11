@@ -30,6 +30,10 @@ const TYPES = {
 };
 
 const ALLOWED_EXTENSIONS = Object.keys(TYPES);
+// Types that the browser can show inline. Everything here is a type the app already stores safely; HTML and SVG
+// are not on the allowlist at all, so inline display never runs stored active content.
+const PREVIEW_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf', '.txt', '.csv', '.json'];
+const isPreviewable = (name) => PREVIEW_EXTENSIONS.includes(extensionOf(name));
 const CATEGORIES = ['image', 'document', 'archive'];
 const MAX_NAME_CHARS = 120;
 
@@ -112,6 +116,8 @@ async function contentMatches(spec, filePath) {
 module.exports = {
   TYPES,
   ALLOWED_EXTENSIONS,
+  PREVIEW_EXTENSIONS,
+  isPreviewable,
   CATEGORIES,
   sanitizeFilename,
   extensionOf,
