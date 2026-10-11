@@ -1,17 +1,20 @@
-# Render blueprint for the app server (Flask API + login/signup/dashboard pages).
+# Render blueprint for the Next.js platform (web UI + API in one service).
 # Create it in Render: New > Blueprint > pick this repo and the platform-v1 branch.
-# Secrets marked sync: false are entered in the Render dashboard, never committed.
+# Values marked sync: false are entered in the Render dashboard. Never commit them.
 services:
   - type: web
-    name: pips-platform-api
-    runtime: python
+    name: pips-platform
+    runtime: node
     plan: free
     branch: platform-v1
-    buildCommand: pip install -r requirements.txt
-    # One worker: rate limits are in-process, so multiple workers would multiply the limits.
-    startCommand: gunicorn -w 1 -b 0.0.0.0:$PORT app:app
-    healthCheckPath: /api/health
+    rootDir: web
+    buildCommand: npm ci && npm run build
+    # Single process: rate limits are kept in memory, so multiple instances would multiply them.
+    startCommand: npm start
+    healthCheckPath: /
     envVars:
+      - key: NODE_VERSION
+        value: "22"
       - key: SECRET_KEY
         generateValue: true
       - key: API_KEY_HASH_SECRET
@@ -20,9 +23,9 @@ services:
         sync: false
       - key: PRIVATE_DATA_REPO
         value: web12-app/api-curl-private-data
-      - key: CORS_ALLOWED_ORIGINS
-        value: https://web12-app.github.io
       - key: COOKIE_SECURE
         value: "1"
       - key: COOKIE_SAMESITE
         value: Lax
+      - key: LEGACY_API_KEY
+        sync: false

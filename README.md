@@ -1,241 +1,147 @@
-# api-curl-test-repo — GitHub-backed app database and file storage
+# Pips platform
 
-A small, reusable backend for storing JSON records and files per application. Data lives in a
-**private** GitHub repository, accessed only by the backend through the GitHub Contents API.
-The public repository holds code and documentation only.
+A small, reusable platform for apps: user accounts, apps, scoped API keys, a JSON database, and file storage.
+The web UI and the API are one Next.js application in [`web/`](web/). All private data is stored in a
+separate **private** GitHub repository, so this public repo contains no data and no secrets.
 
-> **Status:** core backend is implemented and tested (accounts, apps, API keys, database API,
-> file API, CSRF, CORS, rate limits). The JavaScript SDK, database browser UI, schema validation,
-> and admin tools are **not built yet**. See *Not yet implemented*.
+## How it fits together
 
-## Architecture
+- **`web/`**: Next.js 16 (App Router). Pages: `/`, `/signup`, `/login`, `/dashboard`. API: `/api/...`.
+- **Private data repo** (`PRIVATE_DATA_REPO`, for example `web12-app/api-curl-private-data`): users, apps,
+  API keys, records, and files as JSON or binary files. Only the server reads and writes it, using `GITHUB_TOKEN`.
+- **Hosting**: Render (see `render.yaml`). The GitHub Pages site is retired with this change, because
+  the UI now runs on the Next.js server.
 
-```
-GitHub Pages (static)  ──links──►  Backend (Flask, separately hosted)  ──Contents API──►  Private data repo
-  pages/ + Pages home                app.py, accounts.py, apps.py,                         users/, system/,
-                                     records.py, files_v1.py, storage.py                   apps/<app_id>/...
-```
+Nothing in this repo may contain a token, password, or key. Configuration comes only from environment variables.
 
-GitHub Pages only serves static files, so it cannot run the Python backend. Login cookies are set
-by the backend's own domain, so the Pages site links to the backend's login pages.
-
-| File | Role |
-| --- | --- |
-| `app.py` | Flask app factory, routes, CSRF, CORS, security headers, error envelope |
-| `config.py` | Startup configuration and validation (no secret values in errors) |
-| `storage.py` | Storage engine: GitHub Contents API implementation + in-memory twin for tests |
-| `paths.py` | ID validation and every repository path. Clients never supply paths. |
-| `accounts.py` | Users, password hashing, login rate limiting |
-| `apps.py` | Applications, API keys, request principals, scope checks |
-| `records.py` | Database records (versioned JSON documents) |
-| `files_v1.py` | App-scoped file storage |
-| `errors.py` | Response envelope: `{success, data|error, request_id}` |
-| `build_static.py`, `pages/` | GitHub Pages build (static home, login links, public JSON) |
-| `tests/` | 54 automated tests (no GitHub access needed) |
-
-## Local setup
-
-```bash
-pip install -r requirements.txt -r tests/requirements-dev.txt
-cp .env.example .env          # then fill in values; never commit .env
-set -a; . ./.env; set +a
-python app.py                 # http://127.0.0.1:5000
-python -m pytest -q tests     # 54 unit tests, no GitHub calls
-```
-
-## Environment configuration
-
-Read only from the hosting environment (or `.env` locally). See `.env.example` for every variable.
+## Configuration
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `SECRET_KEY` | yes | Signs sessions |
-| `API_KEY_HASH_SECRET` | yes | Peppers stored API-key hashes. Changing it invalidates all keys. |
-| `GITHUB_TOKEN` | yes | Fine-grained token, Contents read/write on the private repo only |
-| `PRIVATE_DATA_REPO` | yes | `owner/name` of the private repo |
-| `CORS_ALLOWED_ORIGINS` | no | Comma-separated `https://` origins. Wildcards are rejected. |
-| `COOKIE_SAMESITE` | no | `Lax` by default. Use `None` only with a cross-site frontend (requires secure cookies). |
+| `SECRET_KEY` | yes | Signs session cookies. Random, at least 32 bytes. |
+| `API_KEY_HASH_SECRET` | yes | Pepper for hashing API keys. Changing it revokes all keys. |
+| `GITHUB_TOKEN` | yes | Fine-grained token with Contents read and write on the private data repo only. |
+| `PRIVATE_DATA_REPO` | yes | `owner/name` of the private data repo. |
+| `CORS_ALLOWED_ORIGINS` | no | Comma-separated https origins that may call the API from a browser. Never `*`. |
+| `COOKIE_SECURE` | no | Default on. Set `0` only for local http development. |
+| `COOKIE_SAMESITE` | no | `Lax` (default), `Strict`, or `None` (needs secure cookies). |
+| `SESSION_HOURS` | no | Session lifetime. Default 12. |
+| `MAX_RECORD_BYTES` | no | Record size limit. Default 65536. |
+| `MAX_FILE_BYTES` | no | File size limit. Default and maximum 1,000,000 (GitHub Contents API limit). |
+| `LEGACY_API_KEY` | no | Enables the legacy `/api/files` endpoints for `X-API-Key`. |
 
-The app refuses to start when a required variable is missing. The error names the variables,
-never their values.
+Missing or invalid settings are reported at startup by variable name only. Values are never printed.
+A `.env.example` lists the variables with placeholders.
 
-**GitHub secret names cannot start with `GITHUB_`.** If you store the token as a GitHub Actions or
-environment secret, name it something like `PRIVATE_DATA_TOKEN`, and map it to `GITHUB_TOKEN` on
-the host.
-
-## Private data repository
-
-1. Create a private repository (for example `web12-app/api-curl-private-data`).
-2. Create a fine-grained token limited to that repository with **Contents: read and write**.
-3. Set `PRIVATE_DATA_REPO` and `GITHUB_TOKEN` on the backend host.
-
-Layout (created on demand, not pre-populated):
-
-```
-users/<user_id>.json                       account (password hash, username, created)
-system/usernames/<username>.json           username -> user_id
-system/owners/<user_id>/<app_id>.json      app ownership index
-apps/<app_id>/metadata.json                app metadata and owner
-apps/<app_id>/api_keys/<key_id>.json       key metadata and HMAC hash (never the secret)
-apps/<app_id>/database/collections/<collection>/<record_id>.json
-apps/<app_id>/files/meta/<file_id>.json    file metadata
-apps/<app_id>/files/blobs/<file_id>.bin    file content
-files/<name>                               legacy /api/files store
-```
-
-Keep this repository private. Anyone who can read it can read all stored data.
-
-## Backend deployment
-
-Any host that runs Python 3.10+ and gunicorn works (Render, Railway, Fly.io, a VPS).
-
-- Build command: `pip install -r requirements.txt`
-- Start command: `gunicorn app:app`
-- Set the environment variables above on the host.
-- Check `GET /api/health`. It reports `storage: ok` only when the backend can read the private repo.
-
-Run more than one worker or instance only after moving the rate limiter to a shared store (see
-Security notes).
-
-## GitHub Pages deployment
-
-The workflow `.github/workflows/pages.yml` runs `build_static.py` and publishes `pages/` and the
-public JSON under `/api/`. It does not need any secrets.
-
-Set the repository **variable** `APP_URL` (Settings → Secrets and variables → Actions → Variables)
-to the backend's public URL, then re-run the workflow. Without `APP_URL`, the login and signup
-buttons on the Pages site are disabled.
-
-## Authentication
-
-- **Signup:** `POST /api/v1/auth/signup` `{username, password}`. Usernames are 3–32 lowercase letters,
-  digits, or `_`. Passwords are 8–200 characters and stored with Werkzeug's salted hash.
-- **Login:** `POST /api/v1/auth/login`. Sets an HTTP-only session cookie that expires after
-  `SESSION_HOURS` (default 12). Logout: `POST /api/v1/auth/logout`. Current user: `GET /api/v1/auth/me`.
-- **Rate limits:** 5 failed logins per account per 15 minutes, 30 login attempts per IP per 15
-  minutes, 10 signups per IP per hour. Responses are 429.
-- **CSRF:** every state-changing request that uses the session cookie needs `X-CSRF-Token` (from
-  `GET /api/v1/auth/csrf`) or a `csrf_token` form field. API-key requests don't need it.
-
-## API keys
-
-Each application has its own keys. Owners manage keys with their session (never with an API key).
+## Run locally
 
 ```bash
-# create an app (session + CSRF)
-POST /api/v1/apps                       {"name": "Notes", "description": "..."}
-# create a key (the full key is returned ONCE)
-POST /api/v1/apps/<app_id>/keys         {"name": "web", "environment": "development",
-                                         "scopes": ["db:read", "db:write", "files:read", "files:write"],
-                                         "expires_in_days": 90}
-GET  /api/v1/apps/<app_id>/keys         (metadata only, never the secret)
-DELETE /api/v1/apps/<app_id>/keys/<key_id>   (revoke)
+cd web
+npm ci
+export SECRET_KEY=$(openssl rand -hex 32) API_KEY_HASH_SECRET=$(openssl rand -hex 32)
+export GITHUB_TOKEN=... PRIVATE_DATA_REPO=owner/private-data COOKIE_SECURE=0
+npm run dev            # or: npm run build && npm start
 ```
 
-Keys look like `<app_id>.<key_id>.<secret>`. Send them as `Authorization: Bearer <key>` (or
-`X-API-Key: <key>`). A key works only for its own app and only with the scopes it was given.
+Tests (no network, no GitHub calls; storage is in memory):
 
-## Database API
+```bash
+cd web
+npm test               # vitest: config, passwords, paths, storage, and API flows
+npm run typecheck
+```
 
-Base: `/api/v1/db/<app_id>/<collection>`. Collections: lowercase, start with a letter, up to 48 characters.
+## Deploy on Render
 
-| Method | Path | Scope | Body / notes |
-| --- | --- | --- | --- |
-| POST | `/…/<collection>` | db:write | JSON object. Returns 201 with the record. |
-| GET | `/…/<collection>?limit=20&cursor=0` | db:read | `limit` 1–100. Returns `items` and `next_cursor`. |
-| GET | `/…/<collection>/<record_id>` | db:read | |
-| PUT | `/…/<collection>/<record_id>` | db:write | Replaces `data`. |
-| PATCH | `/…/<collection>/<record_id>` | db:write | Merges fields. `null` removes a field. |
-| DELETE | `/…/<collection>/<record_id>` | db:write | 200 with `{id, deleted}`. |
+1. In Render: **New → Blueprint**, pick this repo and the `platform-v1` branch (or `main` after merge).
+2. Enter `GITHUB_TOKEN` when prompted. `SECRET_KEY` and `API_KEY_HASH_SECRET` are generated.
+3. Open the service URL. Sign up, create an app, and create a key.
 
-Versioning: each record has a `version` that increases on every write. Send `If-Match: <version>`
-(or `"expected_version"` in the body) to avoid overwriting newer changes. A mismatch returns 409.
+The free plan sleeps when idle, so the first request after a quiet period can take about a minute.
 
-Records are limited to `MAX_RECORD_BYTES` (default 64 KB). Schema validation is not implemented yet.
+## Concepts
 
-## File API
+- **Owners** sign up and log in with a username and password. Passwords are hashed with scrypt.
+  Existing werkzeug hashes from the earlier Flask version still verify.
+- **Apps** belong to one owner. Only the owner can create, change, list, or delete them. Deleting an app is a
+  soft delete: it requires `{"confirm": "<app_id>"}`, revokes all its keys, and keeps the data.
+- **API keys** belong to one app and have scopes: `db:read`, `db:write`, `files:read`, `files:write`.
+  The full key (`<app_id>.<key_id>.<secret>`) is shown once. Only an HMAC hash is stored. A key can expire
+  after 1 to 365 days (optional) and can be revoked. API keys can never manage apps or keys.
+- **Requests** authenticate with `Authorization: Bearer <key>` (or `X-API-Key`), or with the session cookie
+  for the owner UI. Cookie-authenticated writes must send `X-CSRF-Token` (from `GET /api/v1/auth/csrf`).
 
-Base: `/api/v1/files`. Use a key, or a logged-in session with `?app_id=<app_id>`.
+## API reference
 
-| Method | Path | Scope | Notes |
-| --- | --- | --- | --- |
-| POST | `/api/v1/files` | files:write | multipart field `file`. Max `MAX_FILE_BYTES` (≤1 MB). |
-| GET | `/api/v1/files` | files:read | Paged metadata (`limit`, `cursor`). |
-| GET | `/api/v1/files/<file_id>` | files:read | Metadata. |
-| GET | `/api/v1/files/<file_id>/download` | files:read | Served as an attachment with `nosniff`. |
-| DELETE | `/api/v1/files/<file_id>` | files:write | |
-
-The client filename is only a display name. It is reduced to its basename and never used in a path.
-Only a few extensions keep their own content type. Everything else is `application/octet-stream`.
-
-## Responses and errors
+All `/api/v1` responses use this envelope:
 
 ```json
-{"success": true, "data": {...}, "request_id": "..."}
-{"success": false, "error": {"code": "PERMISSION_DENIED", "message": "..."}, "request_id": "..."}
+{ "success": true, "data": { }, "request_id": "..." }
+{ "success": false, "error": { "code": "VERSION_CONFLICT", "message": "..." }, "request_id": "..." }
 ```
 
-Common codes: `UNAUTHENTICATED` (401), `INVALID_API_KEY` (401), `PERMISSION_DENIED` (403),
-`CSRF_FAILED` (403), `NOT_FOUND` (404), `CONFLICT` / `VERSION_CONFLICT` (409),
-`PAYLOAD_TOO_LARGE` / `RECORD_TOO_LARGE` / `FILE_TOO_LARGE` (413), `RATE_LIMITED` / `STORAGE_RATE_LIMITED` (429),
-`UPSTREAM_ERROR` (502), `INTERNAL_ERROR` (500). Responses never include stack traces, tokens,
-environment values, or repository paths.
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| GET | `/api/health` | none | Storage status. No configuration values. |
+| GET | `/api/v1/auth/csrf` | none | CSRF token for this session. |
+| POST | `/api/v1/auth/signup` | CSRF | `{username, password}`. Logs in. |
+| POST | `/api/v1/auth/login` | CSRF | `{username, password}`. Rate limited. |
+| POST | `/api/v1/auth/logout` | CSRF | Ends the session. |
+| GET | `/api/v1/auth/me` | optional | Current user or `null`. |
+| GET, POST | `/api/v1/apps` | owner session | List or create apps. |
+| GET, PATCH, DELETE | `/api/v1/apps/{appId}` | owner (GET also a key with `db:read`) | Read, change name/description, or soft-delete. |
+| GET, POST | `/api/v1/apps/{appId}/keys` | owner | List or create keys. The secret is returned once. |
+| DELETE | `/api/v1/apps/{appId}/keys/{keyId}` | owner | Revoke a key. |
+| GET, POST | `/api/v1/db/{appId}/{collection}` | key or owner | List records (`limit` 1-100; `cursor` is a numeric offset, starting at 0) or create one. |
+| GET, PUT, PATCH, DELETE | `/api/v1/db/{appId}/{collection}/{recordId}` | key or owner | Read, replace, merge (`null` removes a field), or delete. |
+| GET, POST | `/api/v1/files` | key or owner (`?app_id=`) | List files or upload (multipart field `file`). |
+| GET, DELETE | `/api/v1/files/{fileId}` | key or owner | File metadata or delete. |
+| GET | `/api/v1/files/{fileId}/download` | key or owner | Download. Always `attachment`, `nosniff`. |
+| GET, POST | `/api/files`, `/api/files/{name}` | session or `X-API-Key: LEGACY_API_KEY` | Legacy file API (unchanged shape). |
+| GET | `/api/hello`, `/api/time`, `/api/me` | none | Legacy endpoints (unchanged shape). |
+
+**Concurrency.** Records have a `version`. Send `If-Match: <version>` (or `expected_version`) to update safely.
+A mismatch returns `409 VERSION_CONFLICT`. Writes to GitHub also use the current blob SHA, so a stale write
+returns `409` and is never retried automatically.
+
+**Limits.** Request body 2 MB. Record 64 KB. File 1,000,000 bytes. Page size 100. Collection names start with
+a lowercase letter, then lowercase letters, digits, `_` or `-` (48 characters at most).
+
+**Error codes** (examples): `UNAUTHENTICATED`, `INVALID_API_KEY`, `PERMISSION_DENIED`, `CSRF_FAILED`,
+`INVALID_JSON`, `INVALID_BODY`, `RECORD_TOO_LARGE`, `FILE_TOO_LARGE`, `EMPTY_FILE`, `MISSING_FILE`,
+`VERSION_CONFLICT`, `RATE_LIMITED`, `PAYLOAD_TOO_LARGE`, `NOT_CONFIGURED`, `UPSTREAM_ERROR`, `INTERNAL_ERROR`.
+
+## Data layout (private repo)
+
+```
+users/<user_id>.json
+system/usernames/<username>.json          -> user_id
+system/owners/<user_id>/<app_id>.json     -> app index
+apps/<app_id>/metadata.json
+apps/<app_id>/api_keys/<key_id>.json      -> HMAC hash, scopes, expiry, revocation
+apps/<app_id>/database/collections/<collection>/<record_id>.json
+apps/<app_id>/files/meta/<file_id>.json
+apps/<app_id>/files/blobs/<file_id>.bin
+files/<name>                              -> legacy file API
+```
+
+Client filenames are only display names. They never become repository paths.
+
+## Limits and known gaps
+
+- Rate limits (login, signup) are in memory. They reset on restart and apply per instance. Run one instance,
+  or add a shared store before scaling out.
+- Each record write is one GitHub commit. Multi-record changes are not transactional.
+- Listing reads one file per item on the page, so keep page sizes small.
+- Not yet built: a JavaScript SDK, a database browser UI, schema validation, and an admin purge tool.
+- The legacy `/api/hello` response still says "Hello from Python!" because clients may depend on it.
+  Changing it is a breaking change, so it is left as is.
 
 ## Security notes
 
-- Every repository path is built from validated IDs (`paths.py`). Client input never becomes a path.
-- App access is checked against the owner (sessions) or the key's app and scopes (API keys) on
-  every request. Unknown or foreign apps return 404 for owners, and 403 for key mismatches.
-- API keys are stored only as HMAC-SHA256 hashes with a server-side pepper.
-- Passwords are stored only as salted hashes.
-- Login uses a rate limiter kept in process memory. **With more than one worker, limits are per
-  worker.** Move the limiter to a shared store (Redis) before scaling out.
-- CORS allows only configured origins, with credentials. There is no wildcard.
-- Deleting an app is a **soft delete**: the app is hidden, its keys are revoked, and data is kept.
-  Permanent purge is not automatic.
-
-## Storage limitations (GitHub Contents API)
-
-- **Not a transactional database.** Each write is a separate commit. Changes across several records
-  are not atomic.
-- **Concurrency:** writes use the current blob SHA, so a stale write returns 409 instead of silently
-  overwriting. Callers must reload and retry.
-- **Retries:** reads retry a few times on transient errors. Writes are never retried automatically.
-- **Rate limits:** GitHub limits API calls per token. Listing and reading many records costs one API
-  call per record on a page. Expect slower responses as collections grow.
-- **Size:** file and record contents over about 1 MB cannot be read through the Contents API, so
-  file uploads are capped at 1 MB.
-- **Listings:** a directory listing returns at most 1,000 entries.
-- **History:** every change creates a Git commit. Deleted data remains in Git history.
-
-## Tests
-
-```bash
-python -m pytest -q tests
-```
-
-The unit tests use an in-memory storage with the same concurrency rules and mock the GitHub HTTP
-layer for failure cases (conflicts, 5xx retries, rate limits, network errors, token leakage). They
-never contact GitHub and need no credentials.
-
-An end-to-end check against a real private repo is run separately with production-like credentials
-and cleans up the data it creates. It was run once for this release: 13 of 13 checks passed.
-
-## Not yet implemented
-
-- JavaScript SDK (`DatabaseClient` and file helpers)
-- Database browser and record editor UI; API documentation page in the frontend
-- Schema validation for collections
-- Admin role and purge tooling
-- Shared rate-limit store (needed for multiple workers)
-- Streaming for files larger than 1 MB (the Contents API cannot provide them)
-- Frontend pages on GitHub Pages that call the backend directly (today the Pages site only links)
-
-## Troubleshooting
-
-- **Backend returns 503 `NOT_CONFIGURED`:** a required variable is missing. The message names it.
-- **`/api/health` returns 503 `storage: unavailable`:** the token is missing, expired, or lacks
-  access to `PRIVATE_DATA_REPO`.
-- **Login works locally but not on Pages:** set `APP_URL`, and set `CORS_ALLOWED_ORIGINS` to the
-  Pages origin. Use `COOKIE_SAMESITE=None` only for a cross-site setup.
-- **Every API call returns 403 `CSRF_FAILED`:** send `X-CSRF-Token` from `GET /api/v1/auth/csrf`.
+- CORS allows only listed origins and never sends credentials to others.
+- Sessions are signed, HttpOnly, and `SameSite=Lax` by default. Owner routes refuse API keys.
+- Error responses never include stack traces, tokens, or repository paths.
+- Uploaded files are served as `attachment` with `X-Content-Type-Options: nosniff`. Only a short list of
+  safe types keeps its own content type; everything else is `application/octet-stream`.
+- Report a leaked key or token immediately, and rotate it in Render and GitHub.
