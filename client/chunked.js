@@ -46,6 +46,13 @@ function sendUpload(file, uploadId, onProgress, signal) {
   });
 }
 
+// One-shot whole-file upload without a queue row: the Tube logo picker and the auto
+// thumbnails use this. Returns { ok, status, body } like api().
+export async function uploadSmallFile(file) {
+  const result = await sendUpload(file, uuid(), () => {}, null);
+  return { ok: result.ok, status: result.status, body: result.body };
+}
+
 // ---- uploads in pieces. The upload id is kept in this browser, so choosing the same file again resumes it.
 
 function resumeKey(file) {
@@ -251,6 +258,83 @@ export async function uploadFiles(fileList, { maxBytes, add, onFinished, notify 
   onFinished();
 }
 
+// ---- auto thumbnails for video uploads (Tube). Best effort: any failure is silent, the capture is
+// time-capped, and the main upload is never blocked by more than a couple of seconds.
+
+// Grabs one frame from a video file and returns it as a JPEG File (named "<original>.thumb.jpg"),
+// or null when the browser cannot decode the video. The frame comes from ~1s in (or 10% of the
+// duration, whichever is shorter) at 640px wide, quality 0.7.
+export async function captureVideoThumbnail(file, { width = 640, timeoutMs = 6000 } = {}) {
+  try {
+    if (!file || !file.type || file.type.indexOf('video/') !== 0) return null;
+    if (typeof document === 'undefined' || !window.URL || !window.URL.createObjectURL) return null;
+    const url = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.muted = true;
+    video.preload = 'metadata';
+    video.src = url;
+    try {
+      const withTimeout = (promise) =>
+        Promise.race([
+          promise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error('thumbnail timeout')), timeoutMs)),
+        ]);
+      // Wait for the first frame, then seek to the target position and wait for that frame.
+      await withTimeout(
+        new Promise((resolve, reject) => {
+          video.onloadeddata = () => resolve();
+          video.onerror = () => reject(new Error('video decode failed'));
+        }),
+      );
+      const duration = isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+      const at = duration ? Math.min(1, duration / 10) : 1;
+      if (at > 0 && Math.abs((video.currentTime || 0) - at) > 0.01) {
+        await withTimeout(
+          new Promise((resolve, reject) => {
+            video.onseeked = () => resolve();
+            video.onerror = () => reject(new Error('video seek failed'));
+            video.currentTime = at;
+          }),
+        );
+      }
+      if (!video.videoWidth || !video.videoHeight) return null;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.min(width, video.videoWidth);
+      canvas.height = Math.round((video.videoHeight / video.videoWidth) * canvas.width);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await withTimeout(
+        new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.7)),
+      );
+      if (!blob) return null;
+      return new File([blob], file.name + '.thumb.jpg', { type: 'image/jpeg' });
+    } finally {
+      URL.revokeObjectURL(url);
+      video.removeAttribute('src');
+      try {
+        video.load();
+      } catch {
+        /* nothing to clean up */
+      }
+    }
+  } catch {
+    return null; // thumbnails are optional; never fail the upload because of one
+  }
+}
+
+// For video files, stores a small "<name>.thumb.jpg" frame BEFORE the main upload, so the Tube
+// publish dialog can suggest it as the thumbnail. Silent no-op on any failure.
+async function storeAutoThumbnail(file) {
+  if (!file.type || file.type.indexOf('video/') !== 0) return;
+  try {
+    const thumb = await captureVideoThumbnail(file);
+    if (thumb) await uploadSmallFile(thumb);
+  } catch {
+    /* best effort */
+  }
+}
+
 async function uploadOne(file, { maxBytes, add, onFinished, notify }) {
   const row = add(file.name, fmtSize(file.size));
   const problem = clientCheck(file, maxBytes);
@@ -259,6 +343,8 @@ async function uploadOne(file, { maxBytes, add, onFinished, notify }) {
     notify('error', file.name + ': ' + problem);
     return;
   }
+  // Auto thumbnail first (bounded, best effort), then the real upload.
+  await storeAutoThumbnail(file);
   // Auto-detection: at or above the threshold the upload switches to resumable pieces.
   if (file.size >= CHUNK_THRESHOLD) {
     await uploadInPieces(file, row, { maxBytes, notify });

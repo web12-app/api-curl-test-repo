@@ -4,7 +4,8 @@
 // unless it matches these patterns exactly.
 const USER_ID_RE = /^[a-f0-9]{32}$/;
 const USERNAME_RE = /^[a-z0-9_]{3,32}$/;
-const ALLOWED_PATH_RE = /^(users\/[a-f0-9]{32}\.json|system\/usernames\/[a-z0-9_]{3,32}\.json|uploads\/[a-f0-9]{32}\/manifest\.json|shares\/[a-f0-9]{64}\.json|upload-links\/[a-f0-9]{64}\.json)$/;
+// system/tube.json is the single Tube document (channels + published videos), shared by every user.
+const ALLOWED_PATH_RE = /^(users\/[a-f0-9]{32}\.json|system\/usernames\/[a-z0-9_]{3,32}\.json|system\/tube\.json|uploads\/[a-f0-9]{32}\/manifest\.json|shares\/[a-f0-9]{64}\.json|upload-links\/[a-f0-9]{64}\.json)$/;
 const SHARE_HASH_RE = /^[a-f0-9]{64}$/;
 
 function userPath(userId) {
@@ -35,9 +36,14 @@ function uploadLinkPath(tokenHash) {
   return `upload-links/${tokenHash}.json`;
 }
 
+// The single Tube document: every channel and every published video, in one JSON file.
+function tubePath() {
+  return 'system/tube.json';
+}
+
 function assertAllowedPath(path) {
   if (!ALLOWED_PATH_RE.test(path)) throw new Error('path not allowed');
   return path;
 }
 
-module.exports = { USERNAME_RE, userPath, usernamePath, manifestPath, sharePath, uploadLinkPath, assertAllowedPath };
+module.exports = { USERNAME_RE, userPath, usernamePath, manifestPath, sharePath, uploadLinkPath, tubePath, assertAllowedPath };

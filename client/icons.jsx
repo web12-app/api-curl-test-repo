@@ -110,3 +110,10 @@ export const CheckIcon = (p) => (
     <path d="m4 12 5 5 11-11" />
   </Svg>
 );
+
+// Filled play-button triangle, used for the Tube brand and thumbnail placeholders.
+export const PlayIcon = (p) => (
+  <Svg {...p}>
+    <path d="M7 4.8v14.4L19.5 12 7 4.8z" fill="currentColor" stroke="none" />
+  </Svg>
+);
