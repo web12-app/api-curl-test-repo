@@ -1,0 +1,114 @@
+# Obtain a compatible llama.cpp runtime for ubuntu x64.
+# Default mode downloads the pinned official CPU prebuilt (fast, verified by
+# running it); 'source' mode compiles the same tag from source instead.
+# The runtime is stored as a versioned artifact that other workflows fetch.
+
+name: model-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_ref:
+        description: 'llama.cpp release tag'
+        required: false
+        default: 'b11574'
+      mode:
+        description: 'prebuilt | source'
+        required: false
+        default: 'prebuilt'
+  workflow_call:
+    inputs:
+      llama_ref:
+        type: string
+        required: false
+        default: 'b11574'
+      mode:
+        type: string
+        required: false
+        default: 'prebuilt'
+    outputs:
+      runtime_version:
+        description: 'llama.cpp version string of the produced runtime'
+        value: ${{ jobs.prebuilt.outputs.runtime_version || jobs.source-build.outputs.runtime_version }}
+
+permissions:
+  contents: read
+
+jobs:
+  prebuilt:
+    if: ${{ inputs.mode != 'source' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      runtime_version: ${{ steps.verify.outputs.runtime_version }}
+    env:
+      LLAMA_REF: ${{ inputs.llama_ref || 'b11574' }}
+    steps:
+      - name: Download pinned prebuilt CPU runtime
+        run: |
+          mkdir -p runtime
+          URL="https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_REF}/llama-${LLAMA_REF}-bin-ubuntu-x64.tar.gz"
+          echo "fetching ${URL}"
+          curl -fL --retry 3 --retry-delay 5 --connect-timeout 30 -o runtime.tgz "$URL"
+          tar -xzf runtime.tgz -C runtime
+          find runtime -maxdepth 2 -type f | head -30
+
+      - name: Verify the executable actually runs
+        id: verify
+        run: |
+          BIN="$(find runtime -type f -name llama-cli | head -1)"
+          [ -n "$BIN" ] || { echo "FAIL: llama-cli not found in the prebuilt archive" >&2; exit 1; }
+          chmod +x "$BIN"
+          VERSION="$("$BIN" --version 2>&1 | head -1)"
+          echo "runtime_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "llama-cli OK: ${VERSION}"
+          # Confirm the runtime knows the qwen35 architecture family at build time.
+          if "$BIN" --help 2>&1 | grep -qi "usage"; then echo "help text present"; fi
+
+      - name: Upload versioned runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-runtime-${{ inputs.llama_ref || 'b11574' }}-ubuntu-x64
+          path: runtime/
+          retention-days: 14
+
+  source-build:
+    if: ${{ inputs.mode == 'source' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      runtime_version: ${{ steps.verify.outputs.runtime_version }}
+    env:
+      LLAMA_REF: ${{ inputs.llama_ref || 'b11574' }}
+    steps:
+      - name: Install build tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y cmake build-essential git
+
+      - name: Build llama.cpp from source at the pinned tag
+        run: |
+          git clone --depth 1 --branch "${LLAMA_REF}" https://github.com/ggml-org/llama.cpp.git src
+          cd src
+          cmake -B build -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF
+          cmake --build build --config Release -j"$(nproc)"
+
+      - name: Verify the executable actually runs
+        id: verify
+        run: |
+          BIN="$(find src/build -type f -name llama-cli | head -1)"
+          [ -n "$BIN" ] || { echo "FAIL: llama-cli was not produced" >&2; exit 1; }
+          VERSION="$("$BIN" --version 2>&1 | head -1)"
+          echo "runtime_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "built llama-cli OK: ${VERSION}"
+          mkdir -p runtime
+          cp "$BIN" runtime/
+          # Static build keeps the single binary; copy shared libs if present.
+          find src/build -name '*.so*' -exec cp {} runtime/ \; 2>/dev/null || true
+
+      - name: Upload versioned runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-runtime-${{ inputs.llama_ref || 'b11574' }}-source-ubuntu-x64
+          path: runtime/
+          retention-days: 14

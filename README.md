@@ -74,3 +74,12 @@ docs/                   documentation
 ## Security in one paragraph
 
 Secrets come only from environment variables and are never written to the repository, logs, pages, or browser code. The GitHub token stays on the server. Share and upload-link tokens are random 256-bit values that are looked up by hash. Previews run in a sandbox, and unknown or active types (HTML, SVG) are never shown inline. The repository is public, so logs are masked. See [Architecture and security](docs/architecture.md).
+
+## GGUF Model Runner
+
+Run the real Hugging Face GGUF model `DevQuasar/Qwen.Qwen3.8-27B-GGUF` (Q2_K,
+architecture `qwen35`, Apache-2.0) locally on GitHub Actions runners or on
+your own worker: validate → download → memory gate → llama.cpp inference with
+streaming output and structured results. See `docs/gguf-model-runner.md` and
+`docs/model-worker.md`. Workflows: `model-validate.yml`, `model-download.yml`,
+`model-build.yml`, `model-inference.yml`, `model-test.yml`.
