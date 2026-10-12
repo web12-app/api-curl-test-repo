@@ -203,3 +203,99 @@ describe('ModelChat.generate against a stub llama-server', () => {
     assert.equal(typeof st.max_tokens, 'number');
   });
 });
+
+describe('_runScript', () => {
+  test('spawns binary programs directly (regression: bash-wrapping /usr/bin/env caused exit 126)', async () => {
+    const chat = new ModelChat({});
+    const out = await chat._runScript('/usr/bin/env', [process.execPath, '-e', 'console.log("env-ok")'], {}, 'probe');
+    assert.ok(out.includes('env-ok'), `stdout was: ${out}`);
+  });
+
+  test('still interprets .sh helpers with bash', async () => {
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const path = require('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mchat-sh-'));
+    const file = path.join(dir, 'helper.sh');
+    fs.writeFileSync(file, '#!/usr/bin/env bash\necho "sh-ok"\n');
+    const chat = new ModelChat({});
+    const out = await chat._runScript(file, [], {}, 'probe');
+    assert.ok(out.includes('sh-ok'), `stdout was: ${out}`);
+  });
+
+  test('failures name the phase and the failing program', async () => {
+    const chat = new ModelChat({});
+    await assert.rejects(
+      () => chat._runScript('/usr/bin/env', ['false'], {}, 'probe'),
+      (err) => /^probe: \/usr\/bin\/env false exited with code 1/.test(err.message),
+    );
+  });
+});
+
+describe('retry', () => {
+  function failingChat() {
+    // A configured but nonexistent binary fails fast (MODEL_RUNTIME_MISSING),
+    // without any network access - deterministic and offline.
+    return new ModelChat({ LLAMA_SERVER_BIN: '/nonexistent/llama-server', MODEL_GGUF_PATH: '/nonexistent/model.gguf' });
+  }
+
+  test('a failed start restarts once, then the cooldown blocks immediate retries', async () => {
+    const chat = failingChat();
+    chat.start();
+    await chat.startPromise;
+    assert.equal(chat.state, 'error');
+    assert.equal(chat.error.code, 'MODEL_RUNTIME_MISSING');
+
+    assert.equal(chat.retry(), false); // fresh failure: inside the cooldown window
+
+    chat.failedAt = Date.now() - 61 * 1000; // white-box: let the cooldown window pass
+    assert.equal(chat.retry(), true); // restart accepted
+    await chat.startPromise; // the restarted chain fails again, honestly
+    assert.equal(chat.state, 'error');
+    assert.equal(chat.error.code, 'MODEL_RUNTIME_MISSING');
+
+    assert.equal(chat.retry(), false); // new failure: cooldown again
+  });
+
+  test('retry is refused for a chat that never failed', () => {
+    const chat = failingChat();
+    assert.equal(chat.state, 'disabled');
+    assert.equal(chat.retry(), false);
+  });
+
+  test('a running start blocks retry', async () => {
+    const chat = failingChat();
+    const pending = chat.start();
+    assert.equal(chat.retry(), false); // startPromise is in flight
+    await pending;
+  });
+});
+
+describe('ChatJobs on an errored runtime', () => {
+  test('create() triggers one bounded restart and reports MODEL_RESTARTING', async () => {
+    const { ChatJobs } = require('../src/chat-jobs');
+    const chat = new ModelChat({ LLAMA_SERVER_BIN: '/nonexistent/llama-server', MODEL_GGUF_PATH: '/nonexistent/model.gguf' });
+    const jobs = new ChatJobs(chat);
+    chat.start();
+    await chat.startPromise;
+    assert.equal(chat.state, 'error');
+
+    assert.throws(
+      () => jobs.create({ id: 'u1', username: 'u' }, { message: 'hello' }),
+      (err) => err.code === 'MODEL_RUNTIME_MISSING', // fresh failure: cooldown, original error surfaced
+    );
+
+    chat.failedAt = Date.now() - 61 * 1000; // white-box: cooldown window passed
+    assert.throws(
+      () => jobs.create({ id: 'u1', username: 'u' }, { message: 'hello' }),
+      (err) => err.code === 'MODEL_RESTARTING', // one bounded restart accepted
+    );
+    await chat.startPromise; // restarted chain fails again
+    assert.equal(chat.state, 'error');
+
+    assert.throws(
+      () => jobs.create({ id: 'u1', username: 'u' }, { message: 'hello' }),
+      (err) => err.code === 'MODEL_RUNTIME_MISSING', // cooldown again
+    );
+  });
+});

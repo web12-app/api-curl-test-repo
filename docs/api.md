@@ -242,11 +242,13 @@ Talk to the local GGUF model (see `docs/gguf-model-runner.md`). The routes exist
 | Method and path | Body | Success | Errors |
 | --- | --- | --- | --- |
 | `GET /api/chat/status` | none | `200`, `data`: `{enabled, state, detail, error, runtime_version, context, max_tokens, timeout_ms, model}`. `state`: `disabled, validating, provisioning-runtime, provisioning-model, checking-memory, loading, ready, error`. `model` carries the verified file facts (`repo, quant, file, bytes, sha256, arch, license`) when known. | `401` |
-| `POST /api/chat` | JSON: `{"message", "history?", "max_tokens?"}` | `202`, `data`: `{id, status, partial}`. `message` is 1-8 000 chars; `history` is an optional array of the last `{role: user\|assistant, content}` exchanges (max 16); `max_tokens` 1-4096, capped by the server. | `400 EMPTY_PROMPT`, `400 PROMPT_TOO_LONG`, `400 BAD_HISTORY`, `400 BAD_MAX_TOKENS`, `401`, `403 CSRF_HEADER_REQUIRED`, `429 MODEL_BUSY`, `503 MODEL_NOT_READY`, `504 GENERATION_TIMEOUT` |
+| `POST /api/chat` | JSON: `{"message", "history?", "max_tokens?"}` | `202`, `data`: `{id, status, partial}`. `message` is 1-8 000 chars; `history` is an optional array of the last `{role: user\|assistant, content}` exchanges (max 16); `max_tokens` 1-4096, capped by the server. | `400 EMPTY_PROMPT`, `400 PROMPT_TOO_LONG`, `400 BAD_HISTORY`, `400 BAD_MAX_TOKENS`, `401`, `403 CSRF_HEADER_REQUIRED`, `429 MODEL_BUSY`, `503 MODEL_NOT_READY`, `503 MODEL_RESTARTING`, `504 GENERATION_TIMEOUT` |
 | `GET /api/chat/jobs/<id>` | none | `200`, `data`: `{id, status, partial, partial_reasoning, result, error}`. Visible only to the job's owner; anyone else gets `404`. `status`: `queued, running, done, error, cancelled`. While `running`, `partial` carries the text generated so far. `result` (on success): `{text, reasoning, elapsed_ms, max_tokens, tokens}`. | `401`, `404` |
 | `DELETE /api/chat/jobs/<id>` | none | `200`, `data.status: "cancelled"`. The generation is aborted on the server. | `401`, `404` |
 
 Nothing here is ever faked: a reply only exists after the local model produced it, failures come back as structured errors, and finished jobs are dropped from memory after 30 minutes.
+
+If the runtime failed earlier, `POST /api/chat` makes one bounded self-heal attempt per minute (finished provisioning steps are reused, partial model downloads resume) and answers `503 MODEL_RESTARTING`; while the cooldown is active the original actionable error is surfaced instead.
 
 ## Status codes at a glance
 

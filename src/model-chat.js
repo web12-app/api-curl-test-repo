@@ -43,6 +43,10 @@ const DEFAULTS = {
   logLines: 120,
 };
 
+// Minimum time between two provisioning attempts after a failure. Keeps the
+// self-heal bounded: a failing source is contacted at most once per window.
+const RETRY_COOLDOWN_MS = 60 * 1000;
+
 // estimate.mjs is ESM (it also feeds the workflows); load it once.
 let estimatePromise = null;
 function loadEstimate() {
@@ -162,6 +166,7 @@ class ModelChat {
     this.startedAt = 0;
     this.logTail = [];
     this.startPromise = null;
+    this.failedAt = 0;
     this.abortControllers = new Set();
 
     // Real model facts recorded by the verified validation run (estimate.mjs);
@@ -198,10 +203,28 @@ class ModelChat {
   // status() so the rest of the site is unaffected.
   start() {
     if (!this.enabled || this.startPromise) return this.startPromise || Promise.resolve();
-    this.startPromise = this._run().catch((err) => {
-      this._fail('MODEL_CHAT_FAILED', err && err.message ? err.message : String(err));
-    });
+    this.startPromise = this._run()
+      .catch((err) => {
+        this._fail('MODEL_CHAT_FAILED', err && err.message ? err.message : String(err));
+      })
+      .finally(() => { this.startPromise = null; });
     return this.startPromise;
+  }
+
+  // One bounded self-heal attempt after a failure (for example a transient
+  // network error during provisioning). Re-runs the whole chain; already
+  // finished work is reused - the extracted runtime and the checksum-verified
+  // model copy are detected on disk, so a retry never repeats what succeeded.
+  // Returns true when a restart was started, false when refused (not failed,
+  // still running, or inside the cooldown window).
+  retry() {
+    if (this.state !== 'error' || !this.enabled || this.startPromise) return false;
+    if (this.failedAt && Date.now() - this.failedAt < RETRY_COOLDOWN_MS) return false;
+    this.error = null;
+    this.state = 'validating';
+    this.detail = 'Restarting the model runtime after the previous failure.';
+    this.start();
+    return true;
   }
 
   async _run() {
@@ -299,6 +322,7 @@ class ModelChat {
   _fail(code, message) {
     this.state = 'error';
     this.error = { code, message: String(message).slice(0, 2000) };
+    this.failedAt = Date.now();
     this.detail = `Model chat failed: ${code}.`;
     console.error(`[model-chat] ${code}: ${String(message).slice(0, 300)}`);
   }
@@ -308,9 +332,17 @@ class ModelChat {
     if (this.logTail.length > DEFAULTS.logLines) this.logTail.shift();
   }
 
+  // Runs a helper command. Shell scripts (*.sh) are interpreted with bash;
+  // anything else is an executable program and is spawned directly. Wrapping a
+  // binary like "/usr/bin/env curl ..." in bash makes bash read the ELF binary
+  // as a script, which fails with "cannot execute binary file" (exit 126).
   _runScript(script, args, env, phase) {
     return new Promise((resolve, reject) => {
-      const child = spawn('bash', [script, ...args], {
+      const isShellScript = script.endsWith('.sh');
+      const cmd = isShellScript ? 'bash' : script;
+      const argv = isShellScript ? [script, ...args] : args.slice();
+      const display = isShellScript ? path.basename(script) : `${script} ${args[0] || ''}`.trim();
+      const child = spawn(cmd, argv, {
         env: { ...process.env, ...env },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
@@ -330,10 +362,10 @@ class ModelChat {
       };
       collect(child.stdout);
       collect(child.stderr);
-      child.on('error', (err) => reject(new Error(`${phase}: could not run ${script}: ${err.message}`)));
+      child.on('error', (err) => reject(new Error(`${phase}: could not run ${display}: ${err.message}`)));
       child.on('close', (code) => {
         if (code === 0) resolve(out);
-        else reject(new Error(`${phase}: ${script} exited with code ${code}. Last output: ${out.slice(-600).trim()}`));
+        else reject(new Error(`${phase}: ${display} exited with code ${code}. Last output: ${out.slice(-600).trim()}`));
       });
     });
   }
