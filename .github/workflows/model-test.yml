@@ -188,7 +188,7 @@ jobs:
       timeout_seconds: '1500'
 
   aggregate:
-    needs: [t1-metadata-validation, t2-missing-model-file, t3-insufficient-memory, t4-invalid-prompt, t5-runtime-startup-failure, t6-generation-timeout]
+    needs: [t1-metadata-validation, t2-missing-model-file, t3-insufficient-memory, t4-invalid-prompt, t5-runtime-startup-failure, t6-generation-timeout, t7-real-inference]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
