@@ -20,6 +20,7 @@ const { ImportJobs } = require('./import-jobs');
 const { TubeService } = require('./tube');
 const { USERNAME_RE } = require('./paths');
 const pages = require('./pages');
+const offlinePage = require('./offline-page');
 
 const MAX_BODY_BYTES = 16 * 1024;
 // Room for the multipart headers and the upload id on top of the file itself.
@@ -579,6 +580,39 @@ async function serveAsset(ctx) {
   send(ctx.res, 200, { 'Content-Type': type, 'Content-Length': String(body.length), 'Cache-Control': 'public, max-age=300' }, body);
 }
 
+// ---- offline fallback. sw-register.js registers sw.js on every page; the worker precaches
+// /offline.html and shows it when a page navigation fails or ngrok answers with its error page.
+// All three are public (like /assets) and must never be cached, so a redeploy replaces them quickly.
+
+const OFFLINE_HTML_HEADERS = {
+  'Cache-Control': 'no-cache',
+  // Inline script and style are required: the page is a single self-contained document.
+  'Content-Security-Policy':
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:",
+};
+
+async function pageOfflineHtml(ctx) {
+  sendHtml(ctx.res, 200, offlinePage.offlineHtml(), OFFLINE_HTML_HEADERS);
+}
+
+async function pageSwJs(ctx) {
+  send(
+    ctx.res,
+    200,
+    { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache', 'Service-Worker-Allowed': '/' },
+    offlinePage.swJs(),
+  );
+}
+
+async function pageSwRegisterJs(ctx) {
+  send(
+    ctx.res,
+    200,
+    { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' },
+    offlinePage.swRegisterJs(),
+  );
+}
+
 // Content-Disposition is always attachment, so a stored file never renders in the browser.
 function contentDisposition(name) {
   return `attachment; filename="${asciiFallback(name)}"; filename*=UTF-8''${encodeFilenameStar(name)}`;
@@ -799,7 +833,8 @@ function shareRateLimit(ctx) {
   ctx.auth.limiter.record(key);
 }
 
-const SHARE_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'";
+// script-src 'self' admits only the static sw-register.js, so the service worker is registered here too.
+const SHARE_PAGE_CSP = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'";
 
 async function pageShare(ctx) {
   const service = requireFileStorage(ctx);
@@ -879,7 +914,8 @@ function linkRateLimit(ctx) {
   ctx.auth.limiter.record(key);
 }
 
-const UPLOAD_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+// script-src 'self' admits only the static sw-register.js, so the service worker is registered here too.
+const UPLOAD_PAGE_CSP = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 // A closed link (revoked, or never existed) answers 404 with no hint which.
 async function openLinkOr404(ctx, service) {
@@ -993,6 +1029,9 @@ const ROUTES = [
   { method: 'GET', path: '/home', handler: pageAppHome },
   { method: 'GET', path: '/explore', handler: pageExplore },
   { method: 'GET', pattern: /^\/assets\/([A-Za-z0-9][A-Za-z0-9._-]*)$/, handler: serveAsset, keys: ['name'] },
+  { method: 'GET', path: '/offline.html', handler: pageOfflineHtml },
+  { method: 'GET', path: '/sw.js', handler: pageSwJs },
+  { method: 'GET', path: '/sw-register.js', handler: pageSwRegisterJs },
   { method: 'GET', path: '/api/health', handler: apiHealth },
   { method: 'GET', path: '/login', handler: pageAuthForm('login') },
   { method: 'GET', path: '/signup', handler: pageAuthForm('signup') },
