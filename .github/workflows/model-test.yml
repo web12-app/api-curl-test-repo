@@ -104,9 +104,10 @@ jobs:
       - name: Empty prompt must be rejected before any model work
         run: |
           : > empty.txt
+          : > dummy.gguf
           set +e
           bash scripts/model/run-inference.sh \
-            --model /dev/null --llama-bin /bin/true --prompt-file empty.txt \
+            --model dummy.gguf --llama-bin /bin/true --prompt-file empty.txt \
             --out t4-result.json > t4.log 2>&1
           RC=$?
           cat t4.log

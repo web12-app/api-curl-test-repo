@@ -105,7 +105,7 @@ fi
 cleanup() { [ "$TMP_PROMPT" = 1 ] && rm -f "$PROMPT_FILE"; return 0; }
 trap cleanup EXIT
 
-RT_V="$(timeout 20 "$LLAMA_BIN" --version 2>/dev/null | head -1 || true)"
+RT_V="$(timeout 20 "$LLAMA_BIN" --version 2>&1 | head -1 || true)"
 RUNTIME_VERSION="${RT_V:-unknown}"
 OUT_LOG="$(mktemp)" ; ERR_LOG="$(mktemp)"
 START_MS="$(date +%s%3N)"
@@ -137,7 +137,7 @@ set -e
 
 END_MS="$(date +%s%3N)"
 ELAPSED_MS=$((END_MS - START_MS))
-RESPONSE_TEXT="$(cat "$OUT_LOG")"
+RESPONSE_TEXT="$(sed -E '/^\[ Prompt:/d; /^\[ Generation:/d' "$OUT_LOG")"
 ERR_TAIL="$(tail -c 1200 "$ERR_LOG" 2>/dev/null || true)"
 rm -f "$OUT_LOG" "$ERR_LOG"
 
