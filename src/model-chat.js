@@ -151,6 +151,10 @@ class ModelChat {
       threads: readIntEnv(env, 'MODEL_THREADS', Math.max(1, os.cpus().length), 1, 128),
       maxTokens: readIntEnv(env, 'MODEL_MAX_TOKENS', DEFAULTS.maxTokens, 1, 4096),
       timeoutMs: readIntEnv(env, 'MODEL_TIMEOUT_MS', DEFAULTS.timeoutMs, 1000, 3600000),
+      // Qwen3-family models spend most of their output on a <think> block
+      // before the answer. The site chat disables that for speed; set
+      // MODEL_THINKING=1 to keep the reasoning (slower, deeper replies).
+      thinking: env.MODEL_THINKING === '1',
       binPath: env.LLAMA_SERVER_BIN || '',
       modelPath: env.MODEL_GGUF_PATH || '',
       repoExplicit: Boolean(env.HF_REPO),
@@ -167,6 +171,7 @@ class ModelChat {
     this.logTail = [];
     this.startPromise = null;
     this.failedAt = 0;
+    this._flagsProbe = null;
     this.abortControllers = new Set();
 
     // Real model facts recorded by the verified validation run (estimate.mjs);
@@ -188,6 +193,7 @@ class ModelChat {
       detail: this.detail,
       error: this.error,
       runtime_version: this.runtimeVersion,
+      thinking: this.opt.thinking,
       context: this.opt.ctx,
       max_tokens: this.opt.maxTokens,
       timeout_ms: this.opt.timeoutMs,
@@ -520,6 +526,33 @@ class ModelChat {
   }
 
   _spawnServer(binPath, modelPath) {
+    return this._serverFlags(binPath).then((flags) => this._spawnServerWithFlags(binPath, modelPath, flags));
+  }
+
+  // llama-server flags that depend on the build. Probed once through --help so
+  // an older binary never dies on an unknown flag.
+  _serverFlags(binPath) {
+    if (!this._flagsProbe) {
+      this._flagsProbe = new Promise((resolve) => {
+        let out = '';
+        const child = spawn(binPath, ['--help'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        child.stdout.on('data', (c) => { out += c; });
+        child.stderr.on('data', (c) => { out += c; });
+        child.on('error', () => resolve(''));
+        child.on('close', () => resolve(out));
+        setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, 10000);
+      });
+    }
+    return this._flagsProbe.then((help) => {
+      if (this.opt.thinking) return [];
+      if (help.includes('--jinja') && help.includes('--reasoning-budget')) {
+        return ['--jinja', '--reasoning-budget', '0'];
+      }
+      return [];
+    });
+  }
+
+  _spawnServerWithFlags(binPath, modelPath, extraFlags) {
     return new Promise((resolve) => {
       this.state = 'loading';
       this.detail = 'Starting llama-server and loading the model into memory.';
@@ -527,6 +560,7 @@ class ModelChat {
         '-m', modelPath,
         '-c', String(this.opt.ctx),
         '-t', String(this.opt.threads),
+        ...extraFlags,
         '--host', '127.0.0.1',
         '--port', String(this.opt.port),
       ];
@@ -638,6 +672,9 @@ class ModelChat {
       stream: Boolean(onDelta),
       cache_prompt: true,
     };
+    if (!this.opt.thinking) {
+      payload.chat_template_kwargs = { enable_thinking: false };
+    }
     const body = JSON.stringify(payload);
     const started = Date.now();
     const controller = new AbortController();
@@ -675,7 +712,19 @@ class ModelChat {
     });
   }
 
-  async _generateOnce(body, controller, started, capped) {
+  _bodyWithoutTemplateKwargs(body) {
+    // `body` is the JSON-stringified payload; strip the kwarg from the object
+    // and re-stringify so the retry request is truly kwarg-free.
+    let obj = body;
+    if (typeof obj === 'string') {
+      try { obj = JSON.parse(obj); } catch { return null; }
+    }
+    if (!obj || typeof obj !== 'object' || !obj.chat_template_kwargs) return null;
+    const { chat_template_kwargs, ...rest } = obj;
+    return JSON.stringify(rest);
+  }
+
+  async _generateOnce(body, controller, started, capped, retried) {
     let res;
     try {
       res = await this._upstreamRequest(body, controller);
@@ -685,6 +734,11 @@ class ModelChat {
     }
     const raw = await res.text();
     if (!res.ok) {
+      const retryBody = retried ? null : this._bodyWithoutTemplateKwargs(body);
+      if (retryBody && /chat_template_kwargs|enable_thinking/i.test(raw)) {
+        // This build/template rejects the kwarg: degrade gracefully once.
+        return this._generateOnce(retryBody, controller, started, capped, true);
+      }
       throw new AppError(502, 'MODEL_UPSTREAM_ERROR', `llama-server returned ${res.status}: ${raw.slice(0, 300)}`);
     }
     let data;
@@ -698,7 +752,7 @@ class ModelChat {
     return this._result(split.text, split.reasoning || message.reasoning_content || '', started, capped, data.usage);
   }
 
-  async _generateStream(body, controller, onDelta, started, capped) {
+  async _generateStream(body, controller, onDelta, started, capped, retried) {
     let res;
     try {
       res = await this._upstreamRequest(body, controller);
@@ -708,6 +762,10 @@ class ModelChat {
     }
     if (!res.ok) {
       const raw = await res.text().catch(() => '');
+      const retryBody = retried ? null : this._bodyWithoutTemplateKwargs(body);
+      if (retryBody && /chat_template_kwargs|enable_thinking/i.test(raw)) {
+        return this._generateStream(retryBody, controller, onDelta, started, capped, true);
+      }
       throw new AppError(502, 'MODEL_UPSTREAM_ERROR', `llama-server returned ${res.status}: ${raw.slice(0, 300)}`);
     }
     const splitter = new ThinkSplitter();
