@@ -36,7 +36,7 @@ Hugging Face at run time.
 | `model-download.yml` | dispatch + `workflow_call` (needs validate) | resumable, checksum-verified download; never commits weights |
 | `model-build.yml` | dispatch + `workflow_call` | pinned prebuilt llama.cpp (default) or source build; versioned runtime artifact |
 | `model-inference.yml` | dispatch + `workflow_call` | one job: fetch runtime → download model → memory gate → stream generation → publish `result.json` + artifact |
-| `model-test.yml` | dispatch + `workflow_call` | test matrix incl. a REAL inference run (t7) |
+| `model-test.yml` | dispatch + `workflow_call` | test matrix incl. a REAL inference run (t7) and a REAL site-chat e2e (t8) |
 
 ### Run inference manually
 
@@ -71,6 +71,85 @@ response, elapsed_ms, error) as a job output, a run summary and an artifact
 - Never run a heavy model job and the live-tunnel workflow on assumptions of
   shared resources - each job gets its own VM; only the small runtime artifact
   (~20 MB) crosses jobs.
+
+## Site chat interface (/chat)
+
+The website itself can host the model: a signed-in user opens **Chat** in the
+top navigation and talks to the same verified GGUF running on the server, via
+`llama-server` (part of the pinned llama.cpp prebuilt). No external AI API is
+involved, and no response is ever faked - if the runtime is not up, the API
+says so.
+
+### How it works
+
+1. `src/model-chat.js` supervises a `llama-server` child process on
+   `127.0.0.1` (never exposed directly) and is the only component that talks
+   to it (`/v1/chat/completions`).
+2. On boot it can **auto-provision**: validate the model live on Hugging Face
+   (`validate-model.sh`), download it checksum-verified and resumable
+   (`download-model.sh`, weights never enter git), fetch the pinned runtime,
+   **measure `MemAvailable`** against the estimate, and only then start the
+   server. Every phase is visible in `GET /api/chat/status`.
+3. `POST /api/chat` creates an in-memory job; the client polls
+   `GET /api/chat/jobs/:id` and sees partial text while the model writes
+   (`<think>` blocks are split out into a collapsible "Model reasoning"
+   section). `DELETE` cancels; a generation timeout (default 7 min) aborts.
+4. Capacity: max 2 concurrent generations, max 2 per user (`429 MODEL_BUSY`).
+   Messages ≤ 8 000 chars, last 16 exchanges sent as history. Jobs are
+   per-user private, kept 30 minutes, never persisted.
+
+### Enabling on the live tunnel
+
+The tunnel stays fast by default. Chat is opt-in through a repository
+variable:
+
+1. Settings → Secrets and variables → Actions → **Variables** →
+   `CHAT_MODEL_ENABLED = true`.
+2. The next `live-tunnel` run boots the site as usual first (tunnel downtime
+   unchanged), then downloads the runtime + model in the background (~10-15
+   minutes on the runner's disk), and flips the chat to ready.
+3. The runner has 16 GiB RAM; ctx 1024 needs ~12.1 GiB measured against
+   `MemAvailable` before loading, so it fits with the site running alongside.
+   If memory is short, the chat reports `MODEL_LOW_MEMORY` with options and
+   the site keeps serving.
+
+### Configuration (environment)
+
+| variable | meaning | default |
+|---|---|---|
+| `LLAMA_SERVER_BIN` | path to `llama-server` | - (unset = chat disabled) |
+| `MODEL_GGUF_PATH` | path to the .gguf file | - |
+| `CHAT_AUTOPROVISION` | `1` fetch runtime+model when missing | `0` |
+| `HF_REPO` / `MODEL_QUANT` / `LLAMA_REF` | provisioning source | verified Qwen Q2_K / b11574 |
+| `MODEL_CTX` | context length (memory-gated) | `1024` |
+| `MODEL_PORT` | loopback port for llama-server | `8190` |
+| `MODEL_MAX_TOKENS` | per-request cap | `256` |
+| `MODEL_TIMEOUT_MS` | generation timeout | `420000` |
+
+### Chat API
+
+| Method and path | Body | Success | Errors |
+| --- | --- | --- | --- |
+| `GET /api/chat/status` | - | `200`, runtime state + verified model facts | `401` |
+| `POST /api/chat` | `{"message", "history?", "max_tokens?"}` | `202`, `data.id` + status | `400 EMPTY_PROMPT`/`PROMPT_TOO_LONG`/`BAD_HISTORY`/`BAD_MAX_TOKENS`, `401`, `429 MODEL_BUSY`, `503 MODEL_NOT_READY` |
+| `GET /api/chat/jobs/:id` | - | `200`, `{status, partial, partial_reasoning, result, error}` (owner only) | `401`, `404` |
+| `DELETE /api/chat/jobs/:id` | - | `200`, cancelled view | `401`, `404` |
+
+Job `status`: `queued → running → done \| error \| cancelled \| timeout`.
+`result` = `{text, reasoning, elapsed_ms, max_tokens, tokens}`. Error codes
+include `GENERATION_TIMEOUT` (504), `GENERATION_CANCELLED`,
+`MODEL_NOT_RUNNING`, `MODEL_UPSTREAM_ERROR`, `MODEL_LOW_MEMORY`.
+
+### Testing
+
+- `test/model-chat.test.js` - generation, SSE reassembly, think-splitting,
+  timeouts, cancellation against a stub llama-server speaking the real
+  protocol.
+- `test/chat-routes.test.js` - page, auth, CSRF, job lifecycle, ownership,
+  busy limits through the real HTTP server.
+- `model-test.yml` **t8-chat-e2e** - the full pipeline on a real runner with
+  the real 10.7 GB Q2_K: provision → memory gate → load → prompt → reply;
+  the job passes only when the model actually answers.
 
 ### Persistent worker (optional, for real speed)
 

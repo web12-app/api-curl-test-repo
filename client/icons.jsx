@@ -117,3 +117,9 @@ export const PlayIcon = (p) => (
     <path d="M7 4.8v14.4L19.5 12 7 4.8z" fill="currentColor" stroke="none" />
   </Svg>
 );
+
+export const ChatIcon = (p) => (
+  <Svg {...p}>
+    <path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.3c-1.2 0-2.4-.2-3.4-.7L4 20l1-4.1a8 8 0 0 1-1.5-4.4A8.4 8.4 0 0 1 12 3.2a8.4 8.4 0 0 1 9 8.3z" />
+  </Svg>
+);

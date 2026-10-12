@@ -4,10 +4,11 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { api } from './api.js';
 import { NoticesProvider } from './notify.jsx';
-import { BoxIcon, HomeIcon, CompassIcon, LogoutIcon, UserIcon, PlayIcon } from './icons.jsx';
+import { BoxIcon, HomeIcon, CompassIcon, LogoutIcon, UserIcon, PlayIcon, ChatIcon } from './icons.jsx';
 import HomePage from './Home.jsx';
 import ExplorePage from './Explore.jsx';
 import TubePage from './Tube.jsx';
+import ChatPage from './Chat.jsx';
 
 function TopNav({ page, username }) {
   async function logout(e) {
@@ -31,6 +32,7 @@ function TopNav({ page, username }) {
         {link('/home', 'home', <HomeIcon />, 'Home')}
         {link('/explore', 'explore', <CompassIcon />, 'Explore')}
         {link('/tube', 'tube', <PlayIcon size={16} />, 'Tube')}
+        {link('/chat', 'chat', <ChatIcon size={16} />, 'Chat')}
       </div>
       <div className="nav-right">
         <span className="user-chip" title="Signed in">
@@ -62,6 +64,8 @@ function App({ boot }) {
           linkMaxFiles={boot.linkMaxFiles}
           linkMaxBytes={boot.linkMaxBytes}
         />
+      ) : boot.page === 'chat' ? (
+        <ChatPage boot={boot} />
       ) : (
         <TubePage boot={boot} />
       )}

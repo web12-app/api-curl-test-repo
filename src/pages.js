@@ -380,6 +380,43 @@ function welcomePage() {
 `;
 }
 
+// Model chat: dark, focused conversation screen. Shares the Tube palette so the two
+// "immersive" screens feel like siblings; the accent is a calm blue, not Tube red.
+const CHAT_CSS = `
+      .chat-root { max-width: 54rem; margin: 0 auto; color: #f1f1f1; display: flex; flex-direction: column; gap: 1rem; min-height: 60vh; }
+      .chat-status { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; background: #16181f; border: 1px solid #262a33; border-radius: 12px; padding: .7rem 1rem; font-size: .88rem; color: #b9c2cf; }
+      .chat-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #566070; }
+      .chat-dot.ready { background: #2ecc71; box-shadow: 0 0 8px rgba(46, 204, 113, .55); }
+      .chat-dot.loading { background: #f1c40f; animation: chat-pulse 1.2s ease-in-out infinite; }
+      .chat-dot.error { background: #ff0033; }
+      @keyframes chat-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) { .chat-dot.loading { animation: none; } }
+      .chat-model { color: #8a919e; font-size: .82rem; }
+      .chat-log { display: flex; flex-direction: column; gap: .9rem; padding: .4rem 0 1rem; }
+      .chat-msg { max-width: 88%; border-radius: 14px; padding: .7rem 1rem; line-height: 1.55; font-size: .95rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .chat-msg.user { align-self: flex-end; background: #2b3a5e; border: 1px solid #34466e; color: #eef2fb; border-bottom-right-radius: 4px; }
+      .chat-msg.assistant { align-self: flex-start; background: #16181f; border: 1px solid #262a33; color: #e8ebf0; border-bottom-left-radius: 4px; }
+      .chat-msg.assistant.pending { color: #aeb6c2; }
+      .chat-msg .chat-reason { margin: 0 0 .6rem; }
+      .chat-msg .chat-reason summary { cursor: pointer; color: #8a919e; font-size: .8rem; user-select: none; }
+      .chat-msg .chat-reason p { margin: .5rem 0 0; color: #9aa3af; font-size: .85rem; border-left: 2px solid #2c313d; padding-left: .7rem; white-space: pre-wrap; }
+      .chat-msg .chat-meta { margin-top: .55rem; font-size: .75rem; color: #6d7683; }
+      .chat-cursor { display: inline-block; width: 8px; height: 1em; vertical-align: text-bottom; background: #4f8cff; animation: chat-pulse 1s ease-in-out infinite; }
+      @media (prefers-reduced-motion: reduce) { .chat-cursor { animation: none; } }
+      .chat-empty { color: #8a919e; background: #16181f; border: 1px solid #262a33; border-radius: 12px; padding: 2.2rem 1.4rem; text-align: center; }
+      .chat-composer { display: flex; gap: .6rem; align-items: flex-end; background: #121418; border: 1px solid #30343d; border-radius: 14px; padding: .6rem; }
+      .chat-composer textarea { flex: 1; min-height: 2.8rem; max-height: 10rem; resize: vertical; background: transparent; border: 0; outline: none; color: #f1f1f1; font: inherit; font-size: .95rem; padding: .45rem .5rem; }
+      .chat-composer textarea::placeholder { color: #566070; }
+      .chat-send { display: inline-flex; align-items: center; gap: .45rem; padding: .55rem 1.1rem; border-radius: 10px; border: 1px solid #4f8cff; background: #4f8cff; color: #fff; font-weight: 700; font-size: .9rem; cursor: pointer; flex: none; }
+      .chat-send:hover { background: #3f7bef; }
+      .chat-send:disabled { opacity: .45; cursor: not-allowed; }
+      .chat-cancel { display: inline-flex; align-items: center; gap: .4rem; padding: .5rem 1rem; border-radius: 10px; border: 1px solid #3f4450; background: #222331; color: #f1f1f1; font-size: .88rem; font-weight: 600; cursor: pointer; flex: none; }
+      .chat-cancel:hover { background: #2c2d40; }
+      .chat-note { font-size: .8rem; color: #6d7683; padding: 0 .3rem; }
+      .chat-error { background: #2a1418; border: 1px solid #57242c; color: #f3b6bd; border-radius: 10px; padding: .6rem .9rem; font-size: .86rem; white-space: pre-wrap; }
+      .chat-footer { color: #566070; font-size: .78rem; padding: 0 .3rem; }
+`;
+
 // The logged-in app pages are rendered by the React bundle at /assets/app.js. The server sends a small
 // shell: styles, an empty mount point, and a JSON bootstrap block with the page data. The JSON block is
 // not a script, so the shell can ship a strict CSP (script-src 'self' comes from the server header).
@@ -462,6 +499,13 @@ function tubeFeedPage(boot) {
   return appShell({ title: 'Tube', bootstrap: boot, extraCss: TUBE_CSS });
 }
 
+// The model chat page: a dark, focused conversation screen rendered by the
+// React bundle. The bootstrap block carries the runtime status; CHAT_CSS sets
+// the look. Behind login like every other app page.
+function chatPage(boot) {
+  return appShell({ title: 'Model chat', bootstrap: boot, extraCss: CHAT_CSS });
+}
+
 function tubeWatchPage(boot) {
   return appShell({ title: `${boot.video.title} - Tube`, bootstrap: boot, extraCss: TUBE_CSS });
 }
@@ -525,4 +569,4 @@ function errorPage(status, message, user = null) {
   return layout(`Error ${status}`, `<h1>Error ${status}</h1><p class="error">${escapeHtml(message)}</p>`, user);
 }
 
-module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage };
+module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, chatPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage };
