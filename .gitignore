@@ -3,3 +3,7 @@ node_modules/
 .env.*
 !.env.example
 *.log
+
+# model weights are never committed
+*.gguf
+model-cache/

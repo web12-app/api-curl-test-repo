@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/*.test.js",
+    "test": "node --test test/*.test.js test/*.test.mjs",
     "build:client": "esbuild client/main.jsx --bundle --minify --jsx=automatic --target=es2019 --define:process.env.NODE_ENV=\\\"production\\\" --outfile=public/assets/app.js"
   },
   "dependencies": {

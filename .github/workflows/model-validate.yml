@@ -1,0 +1,103 @@
+# Verify the Hugging Face model repository, the actual quantization file,
+# its architecture and runtime compatibility, and estimate RAM needs.
+# Fails clearly when the file is unavailable or unsupported.
+#
+# Verified facts this workflow re-checks live (do not trust names blindly):
+#   repo: DevQuasar/Qwen.Qwen3.8-27B-GGUF | quant: Q2_K
+#   file: Q2_K/Qwen.Qwen3.8-27B.f16.gguf.Q2_K.gguf (10,711,665,024 bytes)
+
+name: model-validate
+
+on:
+  workflow_dispatch:
+    inputs:
+      hf_repo:
+        description: 'Hugging Face GGUF repository'
+        required: false
+        default: 'DevQuasar/Qwen.Qwen3.8-27B-GGUF'
+      quant:
+        description: 'Quantization tag (e.g. Q2_K)'
+        required: false
+        default: 'Q2_K'
+  workflow_call:
+    inputs:
+      hf_repo:
+        type: string
+        required: false
+        default: 'DevQuasar/Qwen.Qwen3.8-27B-GGUF'
+      quant:
+        type: string
+        required: false
+        default: 'Q2_K'
+    outputs:
+      gguf_file:
+        description: 'Verified GGUF file path inside the repo'
+        value: ${{ jobs.validate.outputs.gguf_file }}
+      gguf_size_bytes:
+        description: 'Verified file size in bytes'
+        value: ${{ jobs.validate.outputs.gguf_size_bytes }}
+      gguf_sha256:
+        description: 'Verified sha256 (HF LFS oid)'
+        value: ${{ jobs.validate.outputs.gguf_sha256 }}
+      gguf_arch:
+        description: 'GGUF general.architecture'
+        value: ${{ jobs.validate.outputs.gguf_arch }}
+      gguf_license:
+        description: 'License embedded in the GGUF'
+        value: ${{ jobs.validate.outputs.gguf_license }}
+      download_url:
+        description: 'Direct download URL'
+        value: ${{ jobs.validate.outputs.download_url }}
+      estimated_ram_bytes_1024ctx:
+        description: 'Estimated RAM need at 1024 context'
+        value: ${{ jobs.validate.outputs.estimated_ram_bytes_1024ctx }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      gguf_file: ${{ steps.validate.outputs.gguf_file }}
+      gguf_size_bytes: ${{ steps.validate.outputs.gguf_size_bytes }}
+      gguf_sha256: ${{ steps.validate.outputs.gguf_sha256 }}
+      gguf_arch: ${{ steps.validate.outputs.gguf_arch }}
+      gguf_license: ${{ steps.validate.outputs.gguf_license }}
+      download_url: ${{ steps.validate.outputs.download_url }}
+      estimated_ram_bytes_1024ctx: ${{ steps.validate.outputs.estimated_ram_bytes_1024ctx }}
+      hf_repo: ${{ steps.validate.outputs.hf_repo }}
+      quant: ${{ steps.validate.outputs.quant }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Verify model repository and file
+        id: validate
+        env:
+          HF_REPO: ${{ inputs.hf_repo || 'DevQuasar/Qwen.Qwen3.8-27B-GGUF' }}
+          QUANT: ${{ inputs.quant || 'Q2_K' }}
+        run: bash scripts/model/validate-model.sh
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "## Model validation"
+            echo ""
+            if [ -f result.env ]; then :; fi
+            if [ "${{ steps.validate.outcome }}" = "success" ]; then
+              echo "| field | value |"
+              echo "|---|---|"
+              echo "| repo | \`${{ steps.validate.outputs.hf_repo }}\` |"
+              echo "| file | \`${{ steps.validate.outputs.gguf_file }}\` |"
+              echo "| size | ${{ steps.validate.outputs.gguf_size_bytes }} bytes |"
+              echo "| sha256 | \`${{ steps.validate.outputs.gguf_sha256 }}\` |"
+              echo "| architecture | \`${{ steps.validate.outputs.gguf_arch }}\` |"
+              echo "| license | \`${{ steps.validate.outputs.gguf_license }}\` |"
+              echo "| est. RAM @1024 ctx | ${{ steps.validate.outputs.estimated_ram_bytes_1024ctx }} bytes |"
+            else
+              echo "**FAILED** - see the job log for the actionable \`FAIL:\` message."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

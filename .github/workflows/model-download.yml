@@ -1,0 +1,100 @@
+# Download the verified model file with resumable transfer and checksum
+# verification. The download lands OUTSIDE the git worktree, so weights can
+# never be committed.
+#
+# Note on caching: actions/cache is limited to 10 GiB per repository. The
+# verified Q2_K file is ~10.7 GB, so caching it is NOT practical - this
+# workflow records that decision and relies on the fast HF CDN instead.
+# (Smaller quants, if ever used, hit the actions/cache path automatically.)
+
+name: model-download
+
+on:
+  workflow_dispatch:
+    inputs:
+      hf_repo:
+        description: 'Hugging Face GGUF repository'
+        required: false
+        default: 'DevQuasar/Qwen.Qwen3.8-27B-GGUF'
+      quant:
+        description: 'Quantization tag'
+        required: false
+        default: 'Q2_K'
+  workflow_call:
+    inputs:
+      hf_repo:
+        type: string
+        required: false
+        default: 'DevQuasar/Qwen.Qwen3.8-27B-GGUF'
+      quant:
+        type: string
+        required: false
+        default: 'Q2_K'
+    outputs:
+      model_path:
+        description: 'Local path of the verified model file (this runner only)'
+        value: ${{ jobs.download.outputs.model_path }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: ./.github/workflows/model-validate.yml
+    with:
+      hf_repo: ${{ inputs.hf_repo || 'DevQuasar/Qwen.Qwen3.8-27B-GGUF' }}
+      quant: ${{ inputs.quant || 'Q2_K' }}
+
+  download:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      model_path: ${{ steps.download.outputs.model_path }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Check available storage
+        run: |
+          echo "Disk usage before download:"
+          df -h / | sed -n '1,2p'
+          FREE_KB=$(df -Pk / | awk 'NR==2 {print $4}')
+          NEED_KB=$(( ( ${{ needs.validate.outputs.gguf_size_bytes }} + 536870912 ) / 1024 ))
+          if [ "$FREE_KB" -lt "$NEED_KB" ]; then
+            echo "FAIL: need $((NEED_KB / 1048576)) MiB free, have $((FREE_KB / 1048576)) MiB" >&2
+            exit 1
+          fi
+
+      - name: Download (resumable) and verify checksum
+        id: download
+        env:
+          DOWNLOAD_URL: ${{ needs.validate.outputs.download_url }}
+          EXPECTED_SHA256: ${{ needs.validate.outputs.gguf_sha256 }}
+          EXPECTED_SIZE: ${{ needs.validate.outputs.gguf_size_bytes }}
+        run: |
+          bash scripts/model/download-model.sh
+          echo "model_path=$(stat -c %s "${RUNNER_TEMP}/$(basename "${DOWNLOAD_URL%%\?*}")" >/dev/null 2>&1 && echo "${RUNNER_TEMP}/$(basename "${DOWNLOAD_URL%%\?*}")")" >> "$GITHUB_OUTPUT"
+
+      - name: Try cache metadata (documents the 10 GiB cache decision)
+        run: |
+          SIZE=${{ needs.validate.outputs.gguf_size_bytes }}
+          LIMIT=10066329600  # 9.4 GiB safety line under the 10 GiB repo cache limit
+          if [ "$SIZE" -lt "$LIMIT" ]; then
+            echo "File is cacheable ($SIZE bytes); wire actions/cache in front of the download step for this quant."
+          else
+            echo "File is $SIZE bytes - above the practical actions/cache budget (10 GiB per repo)."
+            echo "Decision: re-download per run from the HF CDN (typically a few minutes) instead of caching."
+          fi
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "## Model download"
+            echo ""
+            echo "- file: \`${{ needs.validate.outputs.gguf_file }}\`"
+            echo "- size: ${{ needs.validate.outputs.gguf_size_bytes }} bytes"
+            echo "- sha256 verified: ${{ needs.validate.outputs.gguf_sha256 != '' }}"
+            echo "- never committed to Git (downloaded outside the worktree)"
+          } >> "$GITHUB_STEP_SUMMARY"

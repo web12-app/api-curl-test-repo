@@ -1,0 +1,222 @@
+# Test suite for the GGUF model runner.
+#
+# t1 metadata validation      -> real model validates
+# t2 missing model file       -> a bogus quantization fails with a clear message
+# t3 insufficient memory      -> the memory gate exits 42 with actionable advice
+# t4 invalid prompts          -> empty prompt rejected before any download
+# t5 runtime startup failures -> a corrupt GGUF fails without fabricating output
+# t6 generation timeouts      -> the timeout cancels generation cleanly
+# t7 real inference           -> a real prompt produces a real model response
+#
+# Each "negative" test asserts the tool FAILS AS DESIGNED: the test job passes
+# only when the underlying tool refused to fabricate a success.
+
+name: model-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_real_inference:
+        description: 'Run the real (heavy, ~10.7 GB download) inference test'
+        required: false
+        default: 'true'
+      prompt:
+        description: 'Prompt for the real inference test'
+        required: false
+        default: 'What is the capital of France? Answer with just the city name.'
+      context_length:
+        description: 'Context length for the real inference test'
+        required: false
+        default: '1024'
+      max_tokens:
+        description: 'Generation limit for the real inference test'
+        required: false
+        default: '48'
+  workflow_call:
+    inputs:
+      run_real_inference:
+        type: string
+        required: false
+        default: 'true'
+      prompt:
+        type: string
+        required: false
+        default: 'What is the capital of France? Answer with just the city name.'
+      context_length:
+        type: string
+        required: false
+        default: '1024'
+      max_tokens:
+        type: string
+        required: false
+        default: '48'
+
+permissions:
+  contents: read
+
+jobs:
+  t1-metadata-validation:
+    uses: ./.github/workflows/model-validate.yml
+
+  t2-missing-model-file:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: A bogus quantization must fail clearly
+        run: |
+          set +e
+          HF_REPO=DevQuasar/Qwen.Qwen3.8-27B-GGUF QUANT=MADE_UP_F16_UNICORN \
+            bash scripts/model/validate-model.sh > t2.log 2>&1
+          RC=$?
+          cat t2.log
+          if [ "$RC" -eq 0 ]; then
+            echo "TEST FAILED: validation succeeded for a non-existent quantization" >&2
+            exit 1
+          fi
+          grep -q "not found" t2.log || { echo "TEST FAILED: failure message is not actionable" >&2; exit 1; }
+          echo "PASS: missing quantization rejected with an actionable message"
+
+  t3-insufficient-memory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: The memory gate must refuse impossible requirements
+        run: |
+          set +e
+          MODEL_BYTES=10711665024 CONTEXT=1024 FORCE_REQUIRED_BYTES=$((64 * 1073741824)) \
+            bash scripts/model/memory-check.sh > t3.log 2>&1
+          RC=$?
+          cat t3.log
+          if [ "$RC" -ne 42 ]; then
+            echo "TEST FAILED: expected exit 42 with actionable guidance, got $RC" >&2
+            exit 1
+          fi
+          grep -q "docs/model-worker.md" t3.log || { echo "TEST FAILED: guidance missing" >&2; exit 1; }
+          echo "PASS: insufficient memory handled safely (exit 42 + options)"
+
+  t4-invalid-prompt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Empty prompt must be rejected before any model work
+        run: |
+          : > empty.txt
+          set +e
+          bash scripts/model/run-inference.sh \
+            --model /dev/null --llama-bin /bin/true --prompt-file empty.txt \
+            --out t4-result.json > t4.log 2>&1
+          RC=$?
+          cat t4.log
+          [ "$RC" -eq 3 ] || { echo "TEST FAILED: expected exit 3, got $RC" >&2; exit 1; }
+          python3 -c 'import json;d=json.load(open("t4-result.json"));assert d["status"]=="error" and d["code"]=="EMPTY_PROMPT", d'
+          echo "PASS: empty prompt rejected with EMPTY_PROMPT"
+
+  runtime:
+    uses: ./.github/workflows/model-build.yml
+    with:
+      llama_ref: b11574
+      mode: prebuilt
+
+  t5-runtime-startup-failure:
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: llama-runtime-b11574-ubuntu-x64
+          path: runtime/
+      - name: A corrupt GGUF must fail without fabricating output
+        run: |
+          chmod +x "$(find runtime -type f -name llama-cli | head -1)"
+          head -c 1048576 /dev/urandom > fake.gguf
+          set +e
+          bash scripts/model/run-inference.sh \
+            --model fake.gguf \
+            --llama-bin "$(find runtime -type f -name llama-cli | head -1)" \
+            --prompt "hello" --timeout 60 --out t5-result.json > t5.log 2>&1
+          RC=$?
+          cat t5.log
+          if [ "$RC" -eq 0 ]; then
+            echo "TEST FAILED: corrupt model produced a success result" >&2
+            exit 1
+          fi
+          python3 -c 'import json;d=json.load(open("t5-result.json"));assert d["status"]=="error" and d["response"] is None, d'
+          echo "PASS: corrupt GGUF reported as error with no fabricated response"
+
+  t6-generation-timeout:
+    needs: runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: The timeout must cancel generation cleanly
+        run: |
+          cat > slow-llama <<'SH'
+          #!/bin/sh
+          # fake runtime that hangs, to prove the timeout path works
+          sleep 300
+          SH
+          chmod +x slow-llama
+          : > prompt.txt && printf 'hello' > prompt.txt
+          head -c 4096 /dev/zero > tiny.gguf
+          set +e
+          bash scripts/model/run-inference.sh \
+            --model tiny.gguf --llama-bin ./slow-llama \
+            --prompt-file prompt.txt --timeout 5 --out t6-result.json > t6.log 2>&1
+          RC=$?
+          cat t6.log
+          if [ "$RC" -ne 5 ]; then
+            echo "TEST FAILED: expected exit 5 (timeout), got $RC" >&2
+            exit 1
+          fi
+          python3 -c 'import json;d=json.load(open("t6-result.json"));assert d["status"]=="timeout" and d["code"]=="GENERATION_TIMEOUT", d'
+          echo "PASS: generation timeout enforced and reported"
+
+  t7-real-inference:
+    if: ${{ inputs.run_real_inference != 'false' }}
+    uses: ./.github/workflows/model-inference.yml
+    with:
+      prompt: ${{ inputs.prompt }}
+      context_length: ${{ inputs.context_length }}
+      max_tokens: ${{ inputs.max_tokens }}
+      timeout_seconds: '1500'
+
+  aggregate:
+    needs: [t1-metadata-validation, t2-missing-model-file, t3-insufficient-memory, t4-invalid-prompt, t5-runtime-startup-failure, t6-generation-timeout]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report test matrix honestly
+        run: |
+          {
+            echo "## Model runner test matrix"
+            echo ""
+            echo "| test | result |"
+            echo "|---|---|"
+            echo "| t1 metadata validation | ${{ needs.t1-metadata-validation.result }} |"
+            echo "| t2 missing model file | ${{ needs.t2-missing-model-file.result }} |"
+            echo "| t3 insufficient memory | ${{ needs.t3-insufficient-memory.result }} |"
+            echo "| t4 invalid prompt | ${{ needs.t4-invalid-prompt.result }} |"
+            echo "| t5 runtime startup failure | ${{ needs.t5-runtime-startup-failure.result }} |"
+            echo "| t6 generation timeout | ${{ needs.t6-generation-timeout.result }} |"
+            if [ "${{ inputs.run_real_inference || 'true' }}" != 'false' ]; then
+              echo "| t7 real inference | ${{ needs.t7-real-inference.result }} |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          FAIL=0
+          [ "${{ needs.t1-metadata-validation.result }}" = "success" ] || FAIL=1
+          [ "${{ needs.t2-missing-model-file.result }}" = "success" ] || FAIL=1
+          [ "${{ needs.t3-insufficient-memory.result }}" = "success" ] || FAIL=1
+          [ "${{ needs.t4-invalid-prompt.result }}" = "success" ] || FAIL=1
+          [ "${{ needs.t5-runtime-startup-failure.result }}" = "success" ] || FAIL=1
+          [ "${{ needs.t6-generation-timeout.result }}" = "success" ] || FAIL=1
+          if [ "${{ inputs.run_real_inference || 'true' }}" != 'false' ]; then
+            [ "${{ needs.t7-real-inference.result }}" = "success" ] || FAIL=1
+          fi
+          exit $FAIL

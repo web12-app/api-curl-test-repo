@@ -1,0 +1,274 @@
+# Real local inference with the verified GGUF model (llama.cpp, CPU).
+#
+# Job layout (important): GitHub runners are separate machines - RAM and disk
+# do NOT pool across jobs. Therefore download + memory check + load + generate
+# all run in ONE job; only the small (~20 MB) runtime artifact crosses jobs.
+#
+# Inputs: prompt (required), context_length, max_tokens, timeout_seconds,
+#         optional worker_url to run on your own persistent worker instead
+#         (TLS enforced; token via WORKER_TOKEN secret - see docs/model-worker.md).
+
+name: model-inference
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Prompt for the model (required)'
+        required: true
+        default: 'Explain in one short sentence what the capital of France is.'
+      context_length:
+        description: 'Context length (256..32768, starts conservative)'
+        required: false
+        default: '1024'
+      max_tokens:
+        description: 'Generation limit (1..4096)'
+        required: false
+        default: '256'
+      timeout_seconds:
+        description: 'Generation timeout in seconds'
+        required: false
+        default: '900'
+      hf_repo:
+        description: 'Hugging Face GGUF repository'
+        required: false
+        default: 'DevQuasar/Qwen.Qwen3.8-27B-GGUF'
+      quant:
+        description: 'Quantization tag'
+        required: false
+        default: 'Q2_K'
+      worker_url:
+        description: 'Optional https:// URL of your persistent worker (empty = run here)'
+        required: false
+        default: ''
+      llama_ref:
+        description: 'llama.cpp release tag'
+        required: false
+        default: 'b11574'
+  workflow_call:
+    inputs:
+      prompt:
+        type: string
+        required: true
+      context_length:
+        type: string
+        required: false
+        default: '1024'
+      max_tokens:
+        type: string
+        required: false
+        default: '256'
+      timeout_seconds:
+        type: string
+        required: false
+        default: '900'
+      hf_repo:
+        type: string
+        required: false
+        default: 'DevQuasar/Qwen.Qwen3.8-27B-GGUF'
+      quant:
+        type: string
+        required: false
+        default: 'Q2_K'
+      worker_url:
+        type: string
+        required: false
+        default: ''
+      llama_ref:
+        type: string
+        required: false
+        default: 'b11574'
+    outputs:
+      status:
+        description: 'success | error | timeout'
+        value: ${{ jobs.infer.outputs.status }}
+      response:
+        description: 'Model-generated response (truncated)'
+        value: ${{ jobs.infer.outputs.response }}
+      elapsed_ms:
+        description: 'Wall time of the generation'
+        value: ${{ jobs.infer.outputs.elapsed_ms }}
+      runtime_version:
+        description: 'llama.cpp version used'
+        value: ${{ jobs.infer.outputs.runtime_version }}
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    uses: ./.github/workflows/model-build.yml
+    with:
+      llama_ref: ${{ inputs.llama_ref || 'b11574' }}
+      mode: prebuilt
+
+  validate:
+    uses: ./.github/workflows/model-validate.yml
+    with:
+      hf_repo: ${{ inputs.hf_repo || 'DevQuasar/Qwen.Qwen3.8-27B-GGUF' }}
+      quant: ${{ inputs.quant || 'Q2_K' }}
+
+  infer:
+    needs: [runtime, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    outputs:
+      status: ${{ steps.result.outputs.status }}
+      response: ${{ steps.result.outputs.response }}
+      elapsed_ms: ${{ steps.result.outputs.elapsed_ms }}
+      runtime_version: ${{ steps.result.outputs.runtime_version }}
+    env:
+      PROMPT: ${{ inputs.prompt }}
+      CONTEXT_LENGTH: ${{ inputs.context_length || '1024' }}
+      MAX_TOKENS: ${{ inputs.max_tokens || '256' }}
+      TIMEOUT_SECONDS: ${{ inputs.timeout_seconds || '900' }}
+      WORKER_URL: ${{ inputs.worker_url || '' }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Validate inputs (fail fast, before any download)
+        run: |
+          printf '%s' "$PROMPT" > prompt.txt
+          CHARS=$(wc -m < prompt.txt)
+          node scripts/model/estimate.mjs validate-inputs \
+            --prompt-chars "$CHARS" --ctx "$CONTEXT_LENGTH" --max-tokens "$MAX_TOKENS"
+
+      # ---- Worker mode: real inference on YOUR machine, nothing downloads here ----
+      - name: Run inference on persistent worker
+        id: worker
+        if: ${{ env.WORKER_URL != '' }}
+        env:
+          WORKER_TOKEN: ${{ secrets.WORKER_TOKEN }}
+        run: |
+          case "$WORKER_URL" in
+            https://*) : ;;
+            *) echo "FAIL: worker_url must start with https:// (TLS enforced; plain HTTP is refused)" >&2; exit 1 ;;
+          esac
+          [ -n "$WORKER_TOKEN" ] || { echo "FAIL: WORKER_TOKEN secret is required in worker mode" >&2; exit 1; }
+          curl -fsS --max-time 30 -H "Authorization: Bearer $WORKER_TOKEN" "$WORKER_URL/health" > /dev/null \
+            || { echo "FAIL: worker health check failed at $WORKER_URL/health" >&2; exit 1; }
+          START_MS=$(date +%s%3N)
+          BODY=$(jq -n --rawfile p prompt.txt --argjson n "$MAX_TOKENS" \
+            '{prompt: $p, n_predict: $n, temperature: 0.7}')
+          RESP=$(curl -fsS --max-time "$TIMEOUT_SECONDS" \
+              -H "Authorization: Bearer $WORKER_TOKEN" -H 'Content-Type: application/json' \
+              -d "$BODY" "$WORKER_URL/completion") \
+            || { echo "FAIL: worker inference request failed or timed out" >&2; exit 1; }
+          END_MS=$(date +%s%3N)
+          echo "$RESP" | jq '{content, timings}' > worker-response.json
+          node -e '
+            const fs = require("fs");
+            const r = JSON.parse(fs.readFileSync("worker-response.json", "utf8"));
+            const elapsed = Number(process.argv[1]);
+            fs.writeFileSync("result.json", JSON.stringify({
+              status: "success", code: null, message: null,
+              model_repo: process.env.WORKER_URL + " (persistent worker)",
+              model_file: "${{ needs.validate.outputs.gguf_file }}",
+              runtime_version: "llama-server on worker",
+              elapsed_ms: elapsed, prompt_chars: null,
+              context: Number(process.env.CONTEXT_LENGTH), max_tokens: Number(process.env.MAX_TOKENS),
+              response: (r.content || "").trim(), response_chars: (r.content || "").trim().length,
+              error: null,
+            }, null, 2) + "\n");
+          ' "$((END_MS - START_MS))"
+
+      # ---- Local mode: download once, measure RAM, load, generate (one job) ----
+      - name: Fetch pinned runtime artifact
+        if: ${{ env.WORKER_URL == '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: llama-runtime-${{ inputs.llama_ref || 'b11574' }}-ubuntu-x64
+          path: runtime/
+
+      - name: Check storage, then download and verify the model
+        if: ${{ env.WORKER_URL == '' }}
+        env:
+          DOWNLOAD_URL: ${{ needs.validate.outputs.download_url }}
+          EXPECTED_SHA256: ${{ needs.validate.outputs.gguf_sha256 }}
+          EXPECTED_SIZE: ${{ needs.validate.outputs.gguf_size_bytes }}
+        run: |
+          FREE_KB=$(df -Pk "${RUNNER_TEMP}" | awk 'NR==2 {print $4}')
+          NEED_KB=$(( ( EXPECTED_SIZE + 536870912 ) / 1024 ))
+          if [ "$FREE_KB" -lt "$NEED_KB" ]; then
+            echo "FAIL: not enough disk space for the model: need $((NEED_KB / 1048576)) MiB, have $((FREE_KB / 1048576)) MiB" >&2
+            exit 1
+          fi
+          bash scripts/model/download-model.sh
+
+      - name: Memory check before loading (measured, with actionable failure)
+        if: ${{ env.WORKER_URL == '' }}
+        env:
+          MODEL_BYTES: ${{ needs.validate.outputs.gguf_size_bytes }}
+          CONTEXT: ${{ inputs.context_length || '1024' }}
+        run: bash scripts/model/memory-check.sh
+
+      - name: Run inference (streaming, timeout enforced)
+        if: ${{ env.WORKER_URL == '' }}
+        env:
+          MODEL_FILE: ${{ needs.validate.outputs.gguf_file }}
+        run: |
+          BIN="$(find runtime -type f -name llama-cli | head -1)"
+          chmod +x "$BIN"
+          MODEL_PATH="${RUNNER_TEMP}/$(basename "${MODEL_FILE}")"
+          [ -f "$MODEL_PATH" ] || { echo "FAIL: downloaded model not found at ${MODEL_PATH}" >&2; exit 1; }
+          bash scripts/model/run-inference.sh \
+            --model "$MODEL_PATH" \
+            --llama-bin "$BIN" \
+            --prompt-file prompt.txt \
+            --ctx "$CONTEXT_LENGTH" \
+            --max-tokens "$MAX_TOKENS" \
+            --timeout "$TIMEOUT_SECONDS" \
+            --model-repo "${{ needs.validate.outputs.hf_repo }}" \
+            --model-file-name "${MODEL_FILE}" \
+            --out result.json
+
+      - name: Publish result
+        id: result
+        if: always()
+        run: |
+          [ -f result.json ] || { echo "FAIL: no result.json was produced - inference never completed" >&2; exit 1; }
+          STATUS=$(python3 -c 'import json;print(json.load(open("result.json"))["status"])')
+          RESP=$(python3 -c 'import json;print(json.load(open("result.json"))["response"] or "")' | head -c 4000)
+          ELAPSED=$(python3 -c 'import json;print(json.load(open("result.json"))["elapsed_ms"])')
+          RT=$(python3 -c 'import json;print(json.load(open("result.json"))["runtime_version"] or "")')
+          python3 -c 'import json;print(json.load(open("result.json"))["response"] or "")' > response.txt
+          {
+            echo "status=${STATUS}"
+            echo "elapsed_ms=${ELAPSED}"
+            echo "runtime_version=${RT}"
+            echo "response<<EOF"
+            printf '%s\n' "$RESP"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Inference result"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| status | **${STATUS}** |"
+            echo "| model | \`${{ needs.validate.outputs.hf_repo }}\` / \`${{ needs.validate.outputs.gguf_file }}\` |"
+            echo "| architecture | \`${{ needs.validate.outputs.gguf_arch }}\` |"
+            echo "| runtime | ${RT} |"
+            echo "| context / max tokens | ${CONTEXT_LENGTH} / ${MAX_TOKENS} |"
+            echo "| elapsed | ${ELAPSED} ms |"
+            echo ""
+            if [ "$STATUS" = "success" ]; then
+              echo "**Response:**"
+              echo ""
+              printf '> %s\n' "$RESP"
+            else
+              echo "**The run did NOT succeed - no fabricated output.** See the job log for the error."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$STATUS" != "success" ]; then exit 1; fi
+
+      - name: Upload result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-result-${{ github.run_number }}
+          path: |
+            result.json
+            response.txt
+          retention-days: 30
