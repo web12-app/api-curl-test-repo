@@ -140,6 +140,12 @@ Job `status`: `queued → running → done \| error \| cancelled \| timeout`.
 include `GENERATION_TIMEOUT` (504), `GENERATION_CANCELLED`,
 `MODEL_NOT_RUNNING`, `MODEL_UPSTREAM_ERROR`, `MODEL_LOW_MEMORY`.
 
+Self-heal: when provisioning or the runtime fails, the chat stays in `error`
+with the actionable reason and the rest of the site is unaffected. The next
+`POST /api/chat` after a 60 s cooldown restarts the chain once per window
+(`503 MODEL_RESTARTING`); finished steps are reused and partial model
+downloads resume, so a retry never repeats work that already succeeded.
+
 ### Testing
 
 - `test/model-chat.test.js` - generation, SSE reassembly, think-splitting,

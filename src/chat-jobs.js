@@ -85,6 +85,16 @@ class ChatJobs {
   // capacity problems (the route layer turns them into JSON).
   create(user, body) {
     if (this.chat.state === 'error') {
+      // One bounded self-heal attempt per cooldown window: a chat message on a
+      // failed runtime restarts provisioning (cached pieces are reused) and the
+      // caller is told to poll /api/chat/status instead of retrying blindly.
+      if (typeof this.chat.retry === 'function' && this.chat.retry()) {
+        throw new AppError(
+          503,
+          'MODEL_RESTARTING',
+          'the model runtime failed earlier and is restarting. Check /api/chat/status and try again soon.',
+        );
+      }
       throw new AppError(
         503,
         (this.chat.error && this.chat.error.code) || 'MODEL_NOT_READY',
