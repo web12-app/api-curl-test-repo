@@ -299,3 +299,135 @@ describe('ChatJobs on an errored runtime', () => {
     );
   });
 });
+
+describe('thinking toggle (speed)', () => {
+  // Capturing stub: records the request body, answers with a plain reply
+  // unless the handler returns {status, payload} for a custom response.
+  function captureServer(handler) {
+    return new Promise((resolve) => {
+      const server = http.createServer((req, res) => {
+        let raw = '';
+        req.on('data', (c) => { raw += c; });
+        req.on('end', () => {
+          const body = JSON.parse(raw);
+          const out = handler(body);
+          if (out && out.sse) {
+            res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+            for (const piece of out.pieces) {
+              res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: piece } }] }) + '\n\n');
+            }
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+          }
+          if (out && out.status) {
+            res.writeHead(out.status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(out.payload));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ message: { content: String(out) } }], usage: { prompt_tokens: 2, completion_tokens: 1 } }));
+        });
+      });
+      server.listen(0, '127.0.0.1', () => resolve(server));
+    });
+  }
+
+  function chatOn(server, envOverrides = {}) {
+    const chat = new ModelChat({ ...envOverrides }, { upstreamBase: `http://127.0.0.1:${server.address().port}` });
+    chat.state = 'ready';
+    return chat;
+  }
+
+  test('thinking is off by default: enable_thinking=false rides the payload', async () => {
+    let seen = null;
+    const srv = await captureServer((body) => { seen = body; return 'Paris'; });
+    await chatOn(srv).generate({ messages: [{ role: 'user', content: 'Hi' }], maxTokens: 16 });
+    assert.equal(seen.chat_template_kwargs.enable_thinking, false);
+    srv.closeAllConnections();
+    await new Promise((r) => srv.close(r));
+  });
+
+  test('MODEL_THINKING=1 keeps the kwarg out of the payload', async () => {
+    let seen = null;
+    const srv = await captureServer((body) => { seen = body; return 'Paris'; });
+    await chatOn(srv, { MODEL_THINKING: '1' }).generate({ messages: [{ role: 'user', content: 'Hi' }], maxTokens: 16 });
+    assert.equal(seen.chat_template_kwargs, undefined);
+    srv.closeAllConnections();
+    await new Promise((r) => srv.close(r));
+  });
+
+  test('a template that rejects the kwarg degrades to one retry without it', async () => {
+    let kwargTries = 0;
+    const srv = await captureServer((body) => {
+      if (body.chat_template_kwargs) {
+        kwargTries += 1;
+        return { status: 500, payload: { error: { message: 'unknown field: chat_template_kwargs (entry: enable_thinking)' } } };
+      }
+      return 'Paris';
+    });
+    const out = await chatOn(srv).generate({ messages: [{ role: 'user', content: 'Hi' }], maxTokens: 16 });
+    assert.equal(kwargTries, 1);
+    assert.equal(out.text, 'Paris');
+    srv.closeAllConnections();
+    await new Promise((r) => srv.close(r));
+  });
+
+  test('streaming generation degrades the same way', async () => {
+    let kwargTries = 0;
+    const srv = await captureServer((body) => {
+      if (body.chat_template_kwargs) {
+        kwargTries += 1;
+        return { status: 500, payload: { error: { message: 'invalid chat_template_kwargs' } } };
+      }
+      return { sse: true, pieces: ['Pa', 'ris'] };
+    });
+    const deltas = [];
+    const out = await chatOn(srv).generate({
+      messages: [{ role: 'user', content: 'Hi' }],
+      maxTokens: 16,
+      onDelta: (d) => deltas.push(d),
+    });
+    assert.equal(kwargTries, 1);
+    assert.equal(out.text, 'Paris');
+    srv.closeAllConnections();
+    await new Promise((r) => srv.close(r));
+  });
+
+  test('status() reports the thinking switch', () => {
+    assert.equal(new ModelChat({}).status().thinking, false);
+    assert.equal(new ModelChat({ MODEL_THINKING: '1' }).status().thinking, true);
+  });
+});
+
+describe('_serverFlags', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const nodePath = require('node:path');
+
+  function fakeLlama(helpText) {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'mchat-flags-'));
+    const bin = nodePath.join(dir, 'llama-server');
+    fs.writeFileSync(bin, `#!/usr/bin/env bash\nif [ "$1" = "--help" ]; then echo ${JSON.stringify(helpText)}; fi\n`);
+    fs.chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  test('adds reasoning-budget flags when the build supports them and thinking is off', async () => {
+    const bin = fakeLlama('usage: llama-server [options] --jinja --reasoning-budget N number of thinking tokens');
+    const chat = new ModelChat({});
+    assert.deepEqual(await chat._serverFlags(bin), ['--jinja', '--reasoning-budget', '0']);
+  });
+
+  test('an older build without the flags gets none', async () => {
+    const bin = fakeLlama('usage: llama-server [options] --host HOST');
+    const chat = new ModelChat({});
+    assert.deepEqual(await chat._serverFlags(bin), []);
+  });
+
+  test('MODEL_THINKING=1 gets no flags even on a new build', async () => {
+    const bin = fakeLlama('usage: llama-server [options] --jinja --reasoning-budget N');
+    const chat = new ModelChat({ MODEL_THINKING: '1' });
+    assert.deepEqual(await chat._serverFlags(bin), []);
+  });
+});

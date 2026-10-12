@@ -250,6 +250,8 @@ Nothing here is ever faked: a reply only exists after the local model produced i
 
 If the runtime failed earlier, `POST /api/chat` makes one bounded self-heal attempt per minute (finished provisioning steps are reused, partial model downloads resume) and answers `503 MODEL_RESTARTING`; while the cooldown is active the original actionable error is surfaced instead.
 
+Replies skip the Qwen3 thinking block (`enable_thinking: false`) so a short answer returns in seconds instead of half a minute on the runner's CPU; `MODEL_THINKING=1` restores the reasoning text, and any stray `<think>` block is still split off the visible text.
+
 ## Status codes at a glance
 
 | Code | Meaning in this API |

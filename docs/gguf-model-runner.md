@@ -125,6 +125,14 @@ variable:
 | `MODEL_PORT` | loopback port for llama-server | `8190` |
 | `MODEL_MAX_TOKENS` | per-request cap | `256` |
 | `MODEL_TIMEOUT_MS` | generation timeout | `420000` |
+| `MODEL_THINKING` | `1` keeps the Qwen3 `<think>` reasoning block before each answer | off (speed) |
+
+Thinking is disabled by default: on the runner's CPU the reasoning block costs
+about 80% of the generated tokens, so a simple "Hi" took ~35 s with thinking
+and drops to single-digit seconds without it. The chat template is told via
+`enable_thinking: false` (llama-server also gets `--jinja --reasoning-budget 0`
+when its `--help` advertises them, probed per build). If a build rejects the
+template kwarg, generation degrades gracefully to one retry without it.
 
 ### Chat API
 
