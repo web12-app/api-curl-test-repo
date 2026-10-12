@@ -136,6 +136,14 @@ jobs:
           # variable names, so the variables are FILE_STORAGE_*. Without them, login still works and files are disabled.
           GITHUB_OWNER: ${{ vars.FILE_STORAGE_OWNER }}
           GITHUB_STORAGE_REPO: ${{ vars.FILE_STORAGE_REPO }}
+          # Model chat (optional). Set the repository variable CHAT_MODEL_ENABLED to "true" and the app
+          # downloads the pinned llama.cpp runtime plus the verified Qwen Q2_K GGUF in the BACKGROUND
+          # (after the tunnel is already up), then serves /chat. When the variable is unset or "false",
+          # the app is exactly as before. A chat failure never fails the run: it only shows in /chat status.
+          CHAT_AUTOPROVISION: ${{ vars.CHAT_MODEL_ENABLED == 'true' && '1' || '0' }}
+          HF_REPO: DevQuasar/Qwen.Qwen3.8-27B-GGUF
+          MODEL_QUANT: Q2_K
+          LLAMA_REF: b11574
         run: |
           set -uo pipefail
           # Config comes from the environment only. The app never logs secret values.

@@ -34,6 +34,7 @@ Without configuration the home page and `/api/health` still work. Login and file
 - Create an upload link that lets someone without an account send you a file. Links are limited per link and can be revoked.
 - Import a file from any http, https, or data: link. The download runs in the background and survives a page reload.
 - Publish videos to **Tube** - a YouTube-style feed, watch pages, and channels, all behind login.
+- Chat with a real local GGUF model (Qwen Q2_K via llama.cpp) on the **Chat** page - no external AI API, streamed into the page, cancellable, memory-gated.
 
 ## Documentation
 

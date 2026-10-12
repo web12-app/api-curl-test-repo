@@ -7,6 +7,8 @@
 # t5 runtime startup failures -> a corrupt GGUF fails without fabricating output
 # t6 generation timeouts      -> the timeout cancels generation cleanly
 # t7 real inference           -> a real prompt produces a real model response
+# t8 chat e2e                 -> the SITE chat (provision -> load -> /api/chat)
+#                                produces a real reply through the web interface
 #
 # Each "negative" test asserts the tool FAILS AS DESIGNED: the test job passes
 # only when the underlying tool refused to fabricate a success.
@@ -187,8 +189,41 @@ jobs:
       max_tokens: ${{ inputs.max_tokens }}
       timeout_seconds: '1500'
 
+  t8-chat-e2e:
+    if: ${{ inputs.run_real_inference != 'false' }}
+    needs: [t1-metadata-validation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Real chat e2e (provision, load, generate through the site API)
+        env:
+          HF_REPO: DevQuasar/Qwen.Qwen3.8-27B-GGUF
+          QUANT: Q2_K
+          LLAMA_REF: b11574
+          MODEL_CTX: '1024'
+          MODEL_MAX_TOKENS: '48'
+          E2E_PROMPT: ${{ inputs.prompt }}
+        run: node scripts/model/chat-e2e.js --prompt "$E2E_PROMPT" --out chat-e2e-result.json
+      - name: Upload chat e2e result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-e2e-result-${{ github.run_number }}
+          path: |
+            chat-e2e-result.json
+          retention-days: 30
+          if-no-files-found: ignore
+
   aggregate:
-    needs: [t1-metadata-validation, t2-missing-model-file, t3-insufficient-memory, t4-invalid-prompt, t5-runtime-startup-failure, t6-generation-timeout, t7-real-inference]
+    needs: [t1-metadata-validation, t2-missing-model-file, t3-insufficient-memory, t4-invalid-prompt, t5-runtime-startup-failure, t6-generation-timeout, t7-real-inference, t8-chat-e2e]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -208,6 +243,7 @@ jobs:
             echo "| t6 generation timeout | ${{ needs.t6-generation-timeout.result }} |"
             if [ "${{ inputs.run_real_inference || 'true' }}" != 'false' ]; then
               echo "| t7 real inference | ${{ needs.t7-real-inference.result }} |"
+              echo "| t8 chat e2e (site interface) | ${{ needs.t8-chat-e2e.result }} |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           FAIL=0
@@ -219,5 +255,6 @@ jobs:
           [ "${{ needs.t6-generation-timeout.result }}" = "success" ] || FAIL=1
           if [ "${{ inputs.run_real_inference || 'true' }}" != 'false' ]; then
             [ "${{ needs.t7-real-inference.result }}" = "success" ] || FAIL=1
+            [ "${{ needs.t8-chat-e2e.result }}" = "success" ] || FAIL=1
           fi
           exit $FAIL

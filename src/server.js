@@ -19,6 +19,8 @@ const { ChunkedUploads, SESSION_ID_RE } = require('./chunked-uploads');
 const { ImportJobs } = require('./import-jobs');
 const { TubeService } = require('./tube');
 const { USERNAME_RE } = require('./paths');
+const { ModelChat } = require('./model-chat');
+const { ChatJobs } = require('./chat-jobs');
 const pages = require('./pages');
 const offlinePage = require('./offline-page');
 
@@ -106,6 +108,16 @@ function buildFiles(env, authConfig, storage, now, overrides) {
   };
 }
 
+// The site chat: a real llama.cpp llama-server supervised in-process. Disabled
+// unless LLAMA_SERVER_BIN + MODEL_GGUF_PATH are set (or CHAT_AUTOPROVISION=1
+// asks the server to fetch both). Every failure lands in chat.status(); the
+// rest of the site is never affected by the model runtime.
+function buildModelChat(env, overrides = {}) {
+  const chat = new ModelChat(env, { upstreamBase: overrides.upstreamBase });
+  const jobs = new ChatJobs(chat, { now: overrides.now });
+  return { chat, jobs };
+}
+
 // Headers on every response. Downloads add their own on top.
 function securityHeaders() {
   return {
@@ -161,13 +173,13 @@ function sameOrigin(req, corsOrigins) {
   }
 }
 
-function readBody(req) {
+function readBody(req, limit = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
     req.on('data', (chunk) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         reject(new AppError(413, 'PAYLOAD_TOO_LARGE', 'Request body is too large.'));
         return;
       }
@@ -201,6 +213,15 @@ function parseJson(raw) {
 
 async function readJsonBody(ctx) {
   const raw = await readBody(ctx.req);
+  const type = (ctx.req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (type !== 'application/json') throw new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Send JSON.');
+  return parseJson(raw);
+}
+
+// Chat bodies carry the conversation history, so they get a larger cap than
+// the 16 KiB default. The client caps history before sending; this is the hard stop.
+async function readChatJsonBody(ctx) {
+  const raw = await readBody(ctx.req, 256 * 1024);
   const type = (ctx.req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   if (type !== 'application/json') throw new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Send JSON.');
   return parseJson(raw);
@@ -1018,6 +1039,78 @@ async function apiTubeUnpublish(ctx) {
   ok(ctx, 200, { ok: true });
 }
 
+// ---- Model chat API. Every route requires login. The model runs locally in a
+// supervised llama-server; a chat POST creates a job, the client polls it, and
+// DELETE cancels. Status never exposes more than model facts and state names.
+
+// What the browser is allowed to see about the runtime. Internal paths, the
+// port, PIDs, and log lines stay on the server.
+function publicChatStatus(ctx) {
+  const st = ctx.chat.chat.status();
+  return {
+    enabled: st.enabled,
+    state: st.state,
+    detail: st.detail,
+    error: st.error,
+    runtime_version: st.runtime_version,
+    context: st.context,
+    max_tokens: st.max_tokens,
+    timeout_ms: st.timeout_ms,
+    model: st.model
+      ? {
+          repo: st.model.repo,
+          quant: st.model.quant,
+          file: st.model.file,
+          bytes: st.model.bytes,
+          arch: st.model.arch,
+          license: st.model.license,
+          validated_live: st.model.validated_live,
+        }
+      : null,
+  };
+}
+
+async function pageChat(ctx) {
+  requireConfigured(ctx);
+  const user = await currentUser(ctx);
+  if (!user) return redirect(ctx.res, '/login');
+  sendHtml(
+    ctx.res,
+    200,
+    pages.chatPage({ page: 'chat', user: { username: user.username }, chat: publicChatStatus(ctx) }),
+    { 'Content-Security-Policy': APP_SHELL_CSP },
+  );
+}
+
+async function apiChatStatus(ctx) {
+  await requireUser(ctx);
+  ok(ctx, 200, publicChatStatus(ctx));
+}
+
+async function apiChatSend(ctx) {
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readChatJsonBody(ctx);
+  ctx.chat.jobs.cleanup();
+  const view = ctx.chat.jobs.create(user, body);
+  ok(ctx, 202, view);
+}
+
+async function apiChatJob(ctx) {
+  const user = await requireUser(ctx);
+  const view = ctx.chat.jobs.get(ctx.params.jobId, user);
+  if (!view) throw new AppError(404, 'NOT_FOUND', 'No such chat job.');
+  ok(ctx, 200, view);
+}
+
+async function apiChatCancel(ctx) {
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const view = ctx.chat.jobs.cancel(ctx.params.jobId, user);
+  if (!view) throw new AppError(404, 'NOT_FOUND', 'No such chat job.');
+  ok(ctx, 200, view);
+}
+
 const FILE_ID = '([a-f0-9]{32})';
 const LINK_ID = '([a-f0-9]{32})';
 const SESSION = `(${SESSION_ID_RE.source.slice(1, -1)})`;
@@ -1090,6 +1183,12 @@ const ROUTES = [
     handler: pageTubeChannel,
     keys: ['user'],
   },
+  // ---- Model chat: page and JSON API. All behind login, like the rest of the app.
+  { method: 'GET', path: '/chat', handler: pageChat },
+  { method: 'GET', path: '/api/chat/status', handler: apiChatStatus },
+  { method: 'POST', path: '/api/chat', handler: apiChatSend },
+  { method: 'GET', pattern: new RegExp(`^/api/chat/jobs/${UUID}$`), handler: apiChatJob, keys: ['jobId'] },
+  { method: 'DELETE', pattern: new RegExp(`^/api/chat/jobs/${UUID}$`), handler: apiChatCancel, keys: ['jobId'] },
 ];
 
 // Returns every route whose path matches, with any path parameters.
@@ -1135,9 +1234,9 @@ async function handleError(ctx, err) {
   return fail(ctx, 500, 'INTERNAL_ERROR', 'Something went wrong.');
 }
 
-async function dispatch(req, res, auth, corsOrigins) {
+async function dispatch(req, res, auth, corsOrigins, modelChat) {
   const url = new URL(req.url || '/', 'http://localhost');
-  const ctx = { req, res, url, auth, ip: clientIp(req, auth), params: {} };
+  const ctx = { req, res, url, auth, chat: modelChat, ip: clientIp(req, auth), params: {} };
   const method = req.method === 'HEAD' ? 'GET' : req.method;
 
   const isApi = url.pathname.startsWith('/api/');
@@ -1185,8 +1284,9 @@ function createServer(options = {}) {
   const env = options.env || process.env;
   const auth = buildAuth(env, options);
   const corsOrigins = parseCorsOrigins(env.CORS_ALLOWED_ORIGINS);
+  const modelChat = buildModelChat(env, options);
   const server = http.createServer((req, res) => {
-    dispatch(req, res, auth, corsOrigins).catch((err) => {
+    dispatch(req, res, auth, corsOrigins, modelChat).catch((err) => {
       console.error(`Unhandled error: ${err && err.name}`);
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end();
@@ -1194,6 +1294,14 @@ function createServer(options = {}) {
   });
   // Tests use this to run the cleanup sweep directly. Nothing in the app reads it.
   server.fileServices = auth.files;
+  // Tests use these to drive the chat with a stubbed upstream.
+  server.modelChat = modelChat.chat;
+  server.chatJobs = modelChat.jobs;
+  if (modelChat.chat.enabled) {
+    console.log('Model chat: enabled. Starting the llama.cpp runtime in the background.');
+    modelChat.chat.start();
+  }
+  server.on('close', () => modelChat.chat.stop());
   return server;
 }
 
@@ -1208,9 +1316,16 @@ if (require.main === module) {
   const port = Number(process.env.PORT) || 3000;
   const corsCount = parseCorsOrigins(process.env.CORS_ALLOWED_ORIGINS).length;
   if (corsCount) console.log(`CORS allowed for ${corsCount} origin(s) on /api/`);
-  createServer().listen(port, '0.0.0.0', () => {
+  const server = createServer().listen(port, '0.0.0.0', () => {
     console.log(`Listening on port ${port}`);
   });
+  // Make sure the supervised llama-server does not outlive this process.
+  const shutdown = () => {
+    try { server.modelChat.stop(); } catch { /* already gone */ }
+    process.exit(0);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 module.exports = { createServer, buildAuth, parseCorsOrigins, matchRoutes };

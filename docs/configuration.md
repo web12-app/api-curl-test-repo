@@ -43,6 +43,23 @@ These three variables tune the piece-by-piece upload and the temp directory. Lea
 
 The per-file ceiling is **2 GB**, GitHub's own limit for one release asset. It is a code default in `src/files.js` (`DEFAULT_LIMITS`), not an environment setting, and it exists because GitHub refuses larger assets. A change to it needs a separate, reviewed change to the code default.
 
+## Model chat (optional)
+
+The site can host a local GGUF model for the `/chat` page. Without these variables the chat is disabled and the rest of the app is unaffected. See `docs/gguf-model-runner.md` for the full design and the verified model facts.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LLAMA_SERVER_BIN` | - (chat off) | Absolute path to the `llama-server` executable from the pinned llama.cpp release. |
+| `MODEL_GGUF_PATH` | - (chat off) | Absolute path to the .gguf model file. Weights never live inside the git worktree. |
+| `CHAT_AUTOPROVISION` | off | `1` makes the app fetch the pinned runtime and the verified Qwen Q2_K model in the background (live HF validation, resumable, checksum enforced) and start the server when a measured memory check passes. |
+| `HF_REPO` / `MODEL_QUANT` / `LLAMA_REF` | `DevQuasar/Qwen.Qwen3.8-27B-GGUF` / `Q2_K` / `b11574` | Provisioning source. Defaults are the values verified against the HF API and GGUF header. |
+| `MODEL_CTX` | `1024` | Context length. Refused safely when the measured `MemAvailable` cannot cover it. |
+| `MODEL_PORT` | `8190` | Loopback-only port for the supervised llama-server. |
+| `MODEL_MAX_TOKENS` | `256` | Per-request generation cap. |
+| `MODEL_TIMEOUT_MS` | `420000` | Generation timeout; the request is aborted and reported as `GENERATION_TIMEOUT`. |
+
+On the live tunnel, set the repository variable `CHAT_MODEL_ENABLED` to `true` and the workflow passes `CHAT_AUTOPROVISION=1`; leave it unset and nothing changes.
+
 ## Limits
 
 These are set in code (`src/files.js`, `DEFAULT_LIMITS`; `src/chunked-uploads.js`, `CHUNK_LIMITS`; `src/import-jobs.js`, `IMPORT_LIMITS`; `src/url-import.js`, `DEFAULT_TIMEOUTS`). Change them there and run the tests.
@@ -84,6 +101,7 @@ The `live-tunnel` workflow reads these. Names only; keep values in GitHub.
 | --- | --- | --- |
 | `FILE_STORAGE_OWNER` | `GITHUB_OWNER` | GitHub does not allow variable names that begin with `GITHUB_`, so the workflow uses this name. |
 | `FILE_STORAGE_REPO` | `GITHUB_STORAGE_REPO` | Same reason. |
+| `CHAT_MODEL_ENABLED` | `CHAT_AUTOPROVISION` | Set to `true` to make the live tunnel download the model runtime and serve the `/chat` page. Any other value (or unset) keeps the site exactly as before. |
 
 The workflow file also sets `PRIVATE_DATA_REPO`, `CORS_ALLOWED_ORIGINS`, and the ngrok domain. These are not secret, and they are written in the workflow file.
 

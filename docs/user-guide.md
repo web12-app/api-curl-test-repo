@@ -128,6 +128,15 @@ Tube is a YouTube-style layer over your videos. Everything on it is behind login
 
 - `/tube/channel/<username>` shows a channel's logo, description, and videos. There is no listing of all channels; you reach channels from the feed or from a watch page.
 
+## Model chat
+
+**Chat** in the top menu talks to a real open-weights model (Qwen Q2_K) running on the server itself with llama.cpp. There is no external AI service: every word you see was generated on this machine.
+
+- The status bar shows what the runtime is doing. When the server is still downloading or loading the model you will see the current step; the page flips to **Model ready** on its own, usually a few minutes after a fresh deployment.
+- Type a message and press **Send** (or Enter). The reply appears while the model is still writing; a blue cursor marks the unfinished text. If the model shows its reasoning, it collapses into a **Model reasoning** section you can open.
+- Replies are slow on purpose: the model is a 27-billion-parameter file quantized to Q2_K running on CPU, roughly 1-2 tokens per second. **Stop** cancels a generation you no longer want.
+- The last 10 exchanges are sent as context, nothing is stored on the server beyond the 30-minute job list in memory, and each user can run at most two generations at once.
+
 ## Upload links
 
 An upload link is a page that lets anyone with the link upload **one file at a time** into **your** account, with no login.
