@@ -999,7 +999,8 @@ test('upload link: the owner creates a link, anyone uploads with no login, and t
     const html = await page.text();
     assert.match(html, /enctype="multipart\/form-data"/);
     assert.match(html, /name="uploadId"/);
-    assert.doesNotMatch(html, /<script/i, 'the form needs no script');
+    assert.match(html, /<script src="\/sw-register\.js" defer><\/script>/, 'the service-worker register tag ships with the form');
+    assert.doesNotMatch(html, /<script(?![^>]*src="\/sw-register\.js")/i, 'the form needs no script beyond the register tag');
     assert.match(page.headers.get('content-security-policy'), /form-action 'self'/);
 
     // A cross-site origin still works: the token is the credential, and the route has no cookie to abuse.

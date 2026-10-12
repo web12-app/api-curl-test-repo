@@ -24,6 +24,10 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+// Registered on every page (best effort, catch-all errors): the service worker serves the animated
+// /offline.html shell when a navigation fails, instead of a bare network error or ngrok's own page.
+const SW_REGISTER_TAG = '<script src="/sw-register.js" defer></script>';
+
 function errorText(code) {
   return ERROR_TEXT[code] || ERROR_TEXT.INTERNAL_ERROR;
 }
@@ -290,6 +294,7 @@ function layout(title, body, user, { wide = false, extraCss = '', active = '' } 
     <title>${escapeHtml(title)}</title>
     <style>${BASE_CSS}${APP_NAV_CSS}${extraCss}
     </style>
+    ${SW_REGISTER_TAG}
   </head>
   <body${wide ? ' class="wide"' : ''}>
     <nav class="top">${nav}</nav>
@@ -310,6 +315,7 @@ function welcomePage() {
     <title>File Vault - file storage on GitHub</title>
     <style>${WELCOME_CSS}
     </style>
+    ${SW_REGISTER_TAG}
   </head>
   <body class="welcome">
     <div class="glow g1" aria-hidden="true"></div>
@@ -388,6 +394,7 @@ function appShell({ title, bootstrap, fallbackHtml = '', extraCss = '' }) {
     <title>${escapeHtml(title)}</title>
     <style>${BASE_CSS}${APP_NAV_CSS}${DASHBOARD_CSS}${extraCss}
     </style>
+    ${SW_REGISTER_TAG}
   </head>
   <body class="wide">
     <div id="root">${fallbackHtml}${noscript}</div>
