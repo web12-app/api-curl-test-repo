@@ -19,8 +19,11 @@ test('verified model constants are the checked facts', () => {
   assert.equal(MODEL.license, 'apache-2.0');
 });
 
-test('model registry holds the two verified chat models', () => {
-  assert.deepEqual(Object.keys(MODELS), ['qwen3-27b', 'huihui-qwen3-8b']);
+test('model registry holds the four verified chat models', () => {
+  assert.deepEqual(
+    Object.keys(MODELS),
+    ['qwen3-27b', 'huihui-qwen3-8b', 'lfm2-350m', 'qwen25-coder-1-5b'],
+  );
   assert.equal(DEFAULT_MODEL_ID, 'qwen3-27b');
   assert.equal(modelById('qwen3-27b').repo, 'DevQuasar/Qwen.Qwen3.8-27B-GGUF');
   assert.equal(modelById('nope'), null);
@@ -34,6 +37,50 @@ test('model registry holds the two verified chat models', () => {
   assert.equal(huihui.sha256, 'e2c01eff34523c23284ca4f585bf53a3161b4d150c6bed0d71290126ae5e3396');
   assert.equal(huihui.architecture, 'qwen3');
   assert.equal(huihui.license, 'apache-2.0');
+
+  const lfm2 = modelById('lfm2-350m');
+  // Verified live 2026-10-13: unsloth/LFM2-350M-GGUF, flat hyphen layout.
+  assert.equal(lfm2.repo, 'unsloth/LFM2-350M-GGUF');
+  assert.equal(lfm2.quant, 'F16');
+  assert.equal(lfm2.path, 'LFM2-350M-F16.gguf');
+  assert.equal(lfm2.sizeBytes, 711482080);
+  assert.equal(lfm2.sha256, 'eab26c871ba936f60f6990f5ed704e04e75cdc2bb959338241b8c60353a8da16');
+  assert.equal(lfm2.architecture, 'lfm2');
+
+  const coder = modelById('qwen25-coder-1-5b');
+  // Verified live 2026-10-13: RodeoImageGeneration i1 repo, flat layout.
+  assert.equal(coder.repo, 'RodeoImageGeneration/Qwen2.5-Coder-1.5B-Unsensored-DPO-i1-GGUF');
+  assert.equal(coder.quant, 'i1-Q6_K');
+  assert.equal(coder.path, 'Qwen2.5-Coder-1.5B-Unsensored-DPO.i1-Q6_K.gguf');
+  assert.equal(coder.sizeBytes, 1272740224);
+  assert.equal(coder.sha256, '37ca6eece0e88d74a0f1eb2d42e42c12d5061b161672567a08da6c4ebe3ef6d6');
+  assert.equal(coder.architecture, 'qwen2');
+});
+
+test('LFM2 irregular layout uses explicit full-attention count and constant state', () => {
+  const g = modelById('lfm2-350m').geometry;
+  assert.equal(g.layers, 16);
+  assert.equal(fullAttentionLayerCount(g), 6);   // full_attn_idxs has 6 entries
+  assert.equal(linearStateBytes(g), g.constantStateBytes); // short-conv states
+  // KV at 1024: 6 layers * 8 kv heads * 64 head_dim * 2 (K+V) * 2 bytes
+  assert.equal(kvCacheBytes(1024, g), 6 * 1024 * 8 * 64 * 2 * 2);
+  // A 350M F16 fits in under 3 GiB even with the generous overhead.
+  const req = requiredBytesForModel(modelById('lfm2-350m'), 1024);
+  assert.ok(req > modelById('lfm2-350m').sizeBytes);
+  assert.ok(req < 3 * 1024 ** 3, `unexpected LFM2 estimate ${req}`);
+});
+
+test('the coder model is a dense qwen2 and the smallest RAM consumers sort first', () => {
+  const g = modelById('qwen25-coder-1-5b').geometry;
+  assert.equal(fullAttentionLayerCount(g), 28);
+  assert.equal(kvCacheBytes(1024, g), 28 * 1024 * 2 * 128 * 2 * 2);
+  const req = requiredBytesForModel(modelById('qwen25-coder-1-5b'), 1024);
+  assert.ok(req < 3.5 * 1024 ** 3, `unexpected coder estimate ${req}`);
+
+  const byRam = Object.values(MODELS)
+    .map((m) => requiredBytesForModel(m, 1024));
+  assert.ok(byRam[2] < byRam[0] / 4, 'LFM2 needs under a quarter of the 27B RAM');
+  assert.ok(byRam[3] < byRam[1] / 2, 'coder 1.5B needs under half the 8B RAM');
 });
 
 test('the 8B model uses dense qwen3 geometry and needs far less RAM', () => {

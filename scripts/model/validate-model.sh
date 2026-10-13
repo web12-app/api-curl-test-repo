@@ -19,7 +19,8 @@ HF_REPO="${HF_REPO:-DevQuasar/Qwen.Qwen3.8-27B-GGUF}"
 QUANT="${QUANT:-Q2_K}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-}"
 # Architectures the pinned llama.cpp runtime (b11574) can load.
-SUPPORTED_ARCHS="${SUPPORTED_ARCHS:-qwen35 qwen35moe qwen3next qwen3 qwen2 qwen2vl qwen2audio qwen2moe}"
+# lfm2 verified present at that tag: LLM_ARCH_LFM2 in src/llama-arch.cpp.
+SUPPORTED_ARCHS="${SUPPORTED_ARCHS:-qwen35 qwen35moe qwen3next qwen3 qwen2 qwen2vl qwen2audio qwen2moe lfm2 lfm2moe}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -43,9 +44,10 @@ tree = json.loads(os.environ["TREE_JSON"])
 sibs = [s.get("rfilename", "") for s in meta.get("siblings", [])]
 
 def is_quant(name):
-    # Two verified repo layouts:
-    #   - subdirectory: Q2_K/<model>.Q2_K.gguf   (DevQuasar 27B-style)
-    #   - flat:         <model>.Q2_K.gguf        (DevQuasar 8B-style)
+    # Three verified repo layouts:
+    #   - subdirectory: Q2_K/<model>.Q2_K.gguf    (DevQuasar 27B-style)
+    #   - flat dotted:  <model>.Q2_K.gguf         (DevQuasar 8B-style)
+    #   - flat hyphen:  <model>-F16.gguf          (unsloth-style)
     if not name.endswith(".gguf") or "mmproj" in name:
         return False
     base = name.rsplit("/", 1)[-1]
@@ -53,13 +55,14 @@ def is_quant(name):
         return False
     parts = name.split("/")
     dirquant = parts[0] if len(parts) > 1 else ""
-    return dirquant == quant or base == quant + ".gguf" or base.endswith("." + quant + ".gguf")
+    return (dirquant == quant or base == quant + ".gguf"
+            or base.endswith("." + quant + ".gguf") or base.endswith("-" + quant + ".gguf"))
 
 hits = [s for s in sibs if is_quant(s)]
 if not hits:
     quants = sorted({s.split("/")[0] for s in sibs if s.endswith(".gguf") and "/" in s})
     flat = sorted({m.group(1) for s in sibs if s.endswith(".gguf") and "/" not in s
-                   and (m := re.search(r"\.([IQ]?[0-9][A-Za-z0-9_]*)\.gguf$", s))})
+                   and (m := re.search(r"[-._]([A-Za-z0-9_]+)\.gguf$", s))})
     avail = ", ".join(quants + flat) or "(no .gguf files)"
     sys.stderr.write("FAIL: quantization '" + quant + "' not found in the repository file list. Available: " + avail + "\n")
     sys.exit(2)

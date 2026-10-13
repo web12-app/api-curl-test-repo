@@ -340,8 +340,8 @@ test('chat status exposes the verified model registry and the loaded model', asy
     const body = (await res.json()).data;
     assert.deepEqual(
       body.models.map((m) => m.id),
-      ['qwen3-27b', 'huihui-qwen3-8b'],
-      'both the old and the new model are selectable',
+      ['qwen3-27b', 'huihui-qwen3-8b', 'lfm2-350m', 'qwen25-coder-1-5b'],
+      'the old and all newer models are selectable',
     );
     const huihui = body.models.find((m) => m.id === 'huihui-qwen3-8b');
     assert.equal(huihui.repo, 'DevQuasar/huihui-ai.Qwen3-8B-abliterated-GGUF');

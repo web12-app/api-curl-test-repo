@@ -12,6 +12,8 @@
 # t9 chat e2e (8B)            -> the NEW huihui-ai Qwen3-8B Q2_K model through the
 #                                site chat model selection (registry -> /api/chat
 #                                model field -> real reply)
+# t10 chat e2e (small models) -> the LFM2 350M F16 and Qwen2.5 Coder 1.5B
+#                                i1-Q6_K models through the selection API
 #
 # Each "negative" test asserts the tool FAILS AS DESIGNED: the test job passes
 # only when the underlying tool refused to fabricate a success.
@@ -265,8 +267,56 @@ jobs:
           retention-days: 30
           if-no-files-found: ignore
 
+  t10-chat-e2e-small-models:
+    # The two newest selectable models, both cheap to run in CI:
+    #   lfm2-350m        (unsloth/LFM2-350M-GGUF, F16, ~680 MB, arch lfm2)
+    #   qwen25-coder-1-5b (RodeoImageGeneration i1 repo, ~1.2 GB, arch qwen2)
+    if: ${{ inputs.run_real_inference != 'false' }}
+    needs: [t1-metadata-validation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Verify both sources live before any download
+        run: |
+          HF_REPO=unsloth/LFM2-350M-GGUF QUANT=F16 bash scripts/model/validate-model.sh
+          HF_REPO=RodeoImageGeneration/Qwen2.5-Coder-1.5B-Unsensored-DPO-i1-GGUF QUANT=i1-Q6_K bash scripts/model/validate-model.sh
+      - name: Real chat e2e on LFM2 350M via the selection API
+        env:
+          CHAT_DEFAULT_MODEL: lfm2-350m
+          LLAMA_REF: b11574
+          MODEL_CTX: '1024'
+          MODEL_MAX_TOKENS: '48'
+          E2E_PROMPT: ${{ inputs.prompt }}
+        run: node scripts/model/chat-e2e.js --model lfm2-350m --prompt "$E2E_PROMPT" --out chat-e2e-lfm2-result.json
+      - name: Real chat e2e on Qwen2.5 Coder 1.5B via the selection API
+        env:
+          CHAT_DEFAULT_MODEL: qwen25-coder-1-5b
+          LLAMA_REF: b11574
+          MODEL_CTX: '1024'
+          MODEL_MAX_TOKENS: '48'
+          E2E_PROMPT: 'Write a one-line python function that adds two numbers. Reply with code only.'
+        run: node scripts/model/chat-e2e.js --model qwen25-coder-1-5b --prompt "$E2E_PROMPT" --expect 'def add' --out chat-e2e-coder-result.json
+      - name: Upload the small-model chat e2e results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-e2e-small-models-${{ github.run_number }}
+          path: |
+            chat-e2e-lfm2-result.json
+            chat-e2e-coder-result.json
+          retention-days: 30
+          if-no-files-found: ignore
+
   aggregate:
-    needs: [t1-metadata-validation, t2-missing-model-file, t3-insufficient-memory, t4-invalid-prompt, t5-runtime-startup-failure, t6-generation-timeout, t7-real-inference, t8-chat-e2e, t9-chat-e2e-8b]
+    needs: [t1-metadata-validation, t2-missing-model-file, t3-insufficient-memory, t4-invalid-prompt, t5-runtime-startup-failure, t6-generation-timeout, t7-real-inference, t8-chat-e2e, t9-chat-e2e-8b, t10-chat-e2e-small-models]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -288,6 +338,7 @@ jobs:
               echo "| t7 real inference | ${{ needs.t7-real-inference.result }} |"
               echo "| t8 chat e2e (site interface) | ${{ needs.t8-chat-e2e.result }} |"
               echo "| t9 chat e2e (8B selection) | ${{ needs.t9-chat-e2e-8b.result }} |"
+              echo "| t10 chat e2e (small models) | ${{ needs.t10-chat-e2e-small-models.result }} |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           FAIL=0
@@ -301,5 +352,6 @@ jobs:
             [ "${{ needs.t7-real-inference.result }}" = "success" ] || FAIL=1
             [ "${{ needs.t8-chat-e2e.result }}" = "success" ] || FAIL=1
             [ "${{ needs.t9-chat-e2e-8b.result }}" = "success" ] || FAIL=1
+            [ "${{ needs.t10-chat-e2e-small-models.result }}" = "success" ] || FAIL=1
           fi
           exit $FAIL
