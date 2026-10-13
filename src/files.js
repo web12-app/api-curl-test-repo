@@ -13,9 +13,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { AppError, ConflictError } = require('./errors');
-const { manifestPath, sharePath, uploadLinkPath } = require('./paths');
+const { manifestPath, sharePath, uploadLinkPath, attachmentsPath } = require('./paths');
 const { maskName, ref } = require('./redact');
-const { isPreviewable } = require('./file-types');
+const { isPreviewable, sanitizeFilename } = require('./file-types');
 const { GitHubError } = require('./github-releases');
 
 const MB = 1024 * 1024;
@@ -193,6 +193,65 @@ class FileService {
       files: visible.map(publicFile),
       quota: { usedBytes: used.usedBytes, count: used.count, maxFiles: this.limits.maxFiles },
     };
+  }
+
+  // One owner file exactly as the list shows it (the pips-flutter detail view).
+  async get(uid, fileId) {
+    const entry = await this.readReady(uid, fileId);
+    return { file: publicFile(entry) };
+  }
+
+  // Rename one ready file. The manifest is the only place a name lives, so this
+  // is a single guarded manifest write.
+  async rename(uid, fileId, name) {
+    const clean = sanitizeFilename(name);
+    if (!clean) throw new AppError(400, 'INVALID_NAME', 'Send a usable file name.');
+    return this.withManifest(uid, async (manifest) => {
+      const entry = manifest.files.find((f) => f.id === fileId && f.status === 'ready');
+      if (!entry) throw new AppError(404, 'NOT_FOUND', 'File not found.');
+      entry.name = clean;
+      return { save: true, value: { file: publicFile(entry) } };
+    });
+  }
+
+  // Grant named peers (or '*' = any signed-in user) read access to one of my
+  // ready files: DM attachments and avatars. The grant doc is the only record;
+  // no public share link is created.
+  async grantFile(uid, fileId, peers) {
+    const entry = await this.readReady(uid, fileId);
+    const list = [...new Set((Array.isArray(peers) ? peers : []).map((p) => String(p).toLowerCase()))].filter(Boolean);
+    if (!list.length) throw new AppError(400, 'INVALID_PEERS', 'Name at least one peer, or "*".');
+    const p = attachmentsPath(fileId);
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const record = await this.storage.readJson(p);
+      const grant = record && record.data && record.data.owner ? record.data : { owner: uid, peers: [] };
+      grant.peers = [...new Set([...(grant.peers || []), ...list])];
+      try {
+        if (record) await this.storage.updateJson(p, grant, record.sha, `Attachment grant ${fileId}`);
+        else {
+          const made = await this.storage.createJson(p, grant, `Attachment grant ${fileId}`);
+          if (made !== true) throw new ConflictError('grant appeared');
+        }
+        return { file: publicFile(entry), grantedTo: grant.peers };
+      } catch (err) {
+        if (!(err instanceof ConflictError) || attempt === 4) throw err;
+      }
+    }
+  }
+
+  // Resolves a granted file for a named reader, or null when no grant allows them.
+  async resolveGrant(fileId, username) {
+    if (!FILE_ID_RE.test(String(fileId))) return null;
+    const record = await this.storage.readJson(attachmentsPath(fileId)).catch(() => null);
+    const grant = record && record.data;
+    if (!grant || !grant.owner) return null;
+    const peers = Array.isArray(grant.peers) ? grant.peers : [];
+    if (!peers.includes('*') && !peers.includes(String(username || '').toLowerCase())) return null;
+    try {
+      return await this.readReady(grant.owner, fileId);
+    } catch {
+      return null;
+    }
   }
 
   // Looks up an earlier upload by its client id. Returns { status: 'ready', file } or { status: 'pending' } or null.

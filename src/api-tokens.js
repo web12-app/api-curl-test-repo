@@ -67,12 +67,14 @@ async function withTokenDoc(storage, userId, mutate) {
 }
 
 // Mint one token. The raw value is returned ONCE; only its hash is kept.
-async function issueToken(storage, userId, nowMs) {
+// An optional name (label) is shown in the token list.
+async function issueToken(storage, userId, nowMs, name) {
   const secret = crypto.randomBytes(SECRET_BYTES).toString('base64url');
   const token = `${TOKEN_PREFIX}${userId}.${secret}`;
   const entry = {
     id: crypto.randomBytes(TOKEN_ID_BYTES).toString('hex'),
     hash: sha256(token),
+    name: typeof name === 'string' ? name.trim().slice(0, 60) : '',
     created_at: new Date(nowMs).toISOString(),
     revoked_at: null,
   };
@@ -101,7 +103,7 @@ async function resolveToken(storage, token) {
 // Metadata only - never the hash and never the raw secret.
 async function listTokens(storage, userId) {
   const { doc } = await readTokenDoc(storage, userId);
-  return doc.tokens.map(({ id, created_at, revoked_at }) => ({ id, created_at, revoked_at }));
+  return doc.tokens.map(({ id, name, created_at, revoked_at }) => ({ id, name: name || '', created_at, revoked_at }));
 }
 
 async function revokeByRaw(storage, token, nowMs) {
