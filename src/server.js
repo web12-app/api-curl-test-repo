@@ -24,6 +24,9 @@ const { ChatJobs } = require('./chat-jobs');
 const { ModelCache } = require('./model-cache');
 const { OpenAiCompat, sendV1Error, sendV1Json } = require('./openai-compat');
 const apiTokens = require('./api-tokens');
+const { PipsDb } = require('./pipsdb');
+const { Devices } = require('./devices');
+const { Social } = require('./social');
 const pages = require('./pages');
 const offlinePage = require('./offline-page');
 
@@ -108,6 +111,10 @@ function buildFiles(env, authConfig, storage, now, overrides) {
     }),
     // Tube (channels + published videos) rides on the same data-repo storage and the file service.
     tube: new TubeService({ storage, files: service, now }),
+    // Pips app companions: per-user notes DB, device registry, social layer.
+    pips: new PipsDb({ storage, now }),
+    devices: new Devices({ storage, now }),
+    social: new Social({ storage, files: service, now }),
   };
 }
 
@@ -250,6 +257,13 @@ async function readJsonBody(ctx) {
   const type = (ctx.req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
   if (type !== 'application/json') throw new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Send JSON.');
   return parseJson(raw);
+}
+
+// Optional JSON body: {} when the client sends nothing (or not JSON).
+async function readOptionalJson(ctx) {
+  const type = (ctx.req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (type !== 'application/json') return {};
+  return parseJson(await readBody(ctx.req));
 }
 
 // Chat bodies carry the conversation history, so they get a larger cap than
@@ -567,7 +581,8 @@ async function apiCreateToken(ctx) {
     throw new AppError(429, 'RATE_LIMITED', 'Too many API tokens created. Try again later.');
   }
   ctx.auth.limiter.record(limitKey);
-  ok(ctx, 201, { api_token: await apiTokens.issueToken(ctx.auth.storage, user.id, ctx.auth.now()) });
+  const body = await readOptionalJson(ctx);
+  ok(ctx, 201, { api_token: await apiTokens.issueToken(ctx.auth.storage, user.id, ctx.auth.now(), body.name) });
 }
 
 async function apiRevokeToken(ctx) {
@@ -576,6 +591,221 @@ async function apiRevokeToken(ctx) {
   const revoked = await apiTokens.revokeById(ctx.auth.storage, user.id, ctx.params.id, ctx.auth.now());
   if (!revoked) throw new AppError(404, 'TOKEN_NOT_FOUND', 'No such API token.');
   ok(ctx, 200, { revoked: true });
+}
+
+// ---- File detail + rename (pips-flutter file views)
+
+async function apiFileGet(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, await files.service.get(user.id, ctx.params.id));
+}
+
+async function apiFilePatch(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  if (!body || typeof body.name !== 'string') {
+    throw new AppError(400, 'INVALID_BODY', 'Send {"name": "new-name"}.');
+  }
+  ok(ctx, 200, await files.service.rename(user.id, ctx.params.id, body.name));
+}
+
+// ---- Pips DB: per-user text documents (the pips-flutter DB screen)
+
+function pipsDb(ctx) {
+  requireFileStorage(ctx);
+  return ctx.auth.files.pips;
+}
+
+async function apiPipsDbList(ctx) {
+  const db = pipsDb(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { files: await db.list(user.id) });
+}
+
+async function apiPipsDbCreate(ctx) {
+  const db = pipsDb(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  ok(ctx, 201, { file: await db.create(user.id, { name: body.name, content: body.content }) });
+}
+
+async function apiPipsDbRead(ctx) {
+  const db = pipsDb(ctx);
+  const user = await requireUser(ctx);
+  const f = await db.read(user.id, ctx.params.id);
+  ok(ctx, 200, { file: { id: f.id, name: f.name, version: f.version, updated_at: f.updated_at }, content: f.content });
+}
+
+async function apiPipsDbWrite(ctx) {
+  const db = pipsDb(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  ok(ctx, 200, { file: await db.write(user.id, ctx.params.id, body.content) });
+}
+
+async function apiPipsDbEditLine(ctx) {
+  const db = pipsDb(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  ok(ctx, 200, { file: await db.editLine(user.id, ctx.params.id, { line: body.line, action: body.action, text: body.text }) });
+}
+
+async function apiPipsDbMove(ctx) {
+  const db = pipsDb(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  ok(ctx, 200, { file: await db.move(user.id, ctx.params.id, body.name) });
+}
+
+async function apiPipsDbRemove(ctx) {
+  const db = pipsDb(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  ok(ctx, 200, await db.remove(user.id, ctx.params.id));
+}
+
+async function apiPipsDbRestore(ctx) {
+  const db = pipsDb(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  ok(ctx, 200, { file: await db.restore(user.id, ctx.params.id, body.version) });
+}
+
+// ---- Devices: which phones reach the account (pips-flutter profile)
+
+function devicesOf(ctx) {
+  requireFileStorage(ctx);
+  return ctx.auth.files.devices;
+}
+
+async function apiDevicesHeartbeat(ctx) {
+  const devices = devicesOf(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  ok(ctx, 200, { device: await devices.heartbeat(user.id, { id: body.id, name: body.name, platform: body.platform }) });
+}
+
+async function apiDevicesList(ctx) {
+  const devices = devicesOf(ctx);
+  const user = await requireUser(ctx);
+  const current = String(ctx.req.headers['x-device-id'] || '');
+  ok(ctx, 200, { devices: await devices.list(user.id, current) });
+}
+
+async function apiDevicesRemove(ctx) {
+  const devices = devicesOf(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const removed = await devices.remove(user.id, ctx.params.id);
+  if (!removed) throw new AppError(404, 'DEVICE_NOT_FOUND', 'No such device.');
+  ok(ctx, 200, { removed });
+}
+
+// ---- Social: follows, direct messages, notifications, avatars
+
+function socialOf(ctx) {
+  requireFileStorage(ctx);
+  return ctx.auth.files.social;
+}
+
+async function apiSocialUsers(ctx) {
+  const social = socialOf(ctx);
+  const user = await requireUser(ctx);
+  const q = (ctx.url.searchParams.get('q') || '').slice(0, 60);
+  ok(ctx, 200, { users: await social.users(q, user.username) });
+}
+
+async function apiSocialFollow(ctx) {
+  const social = socialOf(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  ok(ctx, 200, await social.follow(user.id, user.username, body.username));
+}
+
+async function apiSocialUnfollow(ctx) {
+  const social = socialOf(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  ok(ctx, 200, await social.unfollow(user.id, user.username, body.username));
+}
+
+async function apiSocialInbox(ctx) {
+  const social = socialOf(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { threads: await social.inbox(user.id, user.username) });
+}
+
+async function apiSocialThread(ctx) {
+  const social = socialOf(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { messages: await social.thread(user.id, user.username, ctx.params.user) });
+}
+
+async function apiSocialSend(ctx) {
+  const social = socialOf(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  const message = await social.send(user.id, user.username, body.to, { text: body.text, fileId: body.fileId });
+  ok(ctx, 201, { message });
+}
+
+async function apiSocialLike(ctx) {
+  const social = socialOf(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  ok(ctx, 200, await social.like(user.id, user.username, body.peer, body.messageId));
+}
+
+async function apiSocialNotifications(ctx) {
+  const social = socialOf(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { items: await social.notifications(user.id) });
+}
+
+async function apiSocialNotificationsRead(ctx) {
+  const social = socialOf(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readOptionalJson(ctx);
+  ok(ctx, 200, await social.notificationsRead(user.id, body.id));
+}
+
+async function apiSocialAvatarPut(ctx) {
+  const social = socialOf(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  if (!body || typeof body.fileId !== 'string' || !body.fileId) {
+    throw new AppError(400, 'INVALID_BODY', 'Send {"fileId": "<id>"} of an uploaded picture.');
+  }
+  ok(ctx, 200, await social.setAvatar(user.id, body.fileId));
+}
+
+// Avatars are read by other users' apps, so this one route stays login-free.
+async function apiSocialAvatarGet(ctx) {
+  const social = socialOf(ctx);
+  ok(ctx, 200, { url: await social.avatarUrl(ctx.params.user) });
+}
+
+async function apiSocialReport(ctx) {
+  const social = socialOf(ctx);
+  await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  ok(ctx, 200, await social.report(body.message || body.text || ''));
 }
 
 // ---- file storage API
@@ -786,6 +1016,11 @@ async function entryForReader(files, user, fileId) {
     if (err instanceof AppError && err.status === 404 && files.tube) {
       const pub = await files.tube.resolvePublic(fileId);
       if (pub) return { entry: pub.entry, viaTube: true };
+    }
+    // DM attachments and avatars: the grants doc names the owner and the readers.
+    if (err instanceof AppError && err.status === 404) {
+      const granted = await files.service.resolveGrant(fileId, user.username);
+      if (granted) return { entry: granted, viaTube: false };
     }
     throw err;
   }
@@ -1308,6 +1543,32 @@ const ROUTES = [
   { method: 'GET', path: '/api/upload-links', handler: apiListUploadLinks },
   { method: 'POST', path: '/api/upload-links', handler: apiCreateUploadLink },
   { method: 'DELETE', pattern: new RegExp(`^/api/upload-links/${LINK_ID}$`), handler: apiRevokeUploadLink },
+  // ---- Pips app: file detail/rename, DB documents, devices, social
+  { method: 'GET', pattern: new RegExp(`^/api/files/${FILE_ID}$`), handler: apiFileGet },
+  { method: 'PATCH', pattern: new RegExp(`^/api/files/${FILE_ID}$`), handler: apiFilePatch, keys: ['id'] },
+  { method: 'GET', path: '/api/db', handler: apiPipsDbList },
+  { method: 'POST', path: '/api/db', handler: apiPipsDbCreate },
+  { method: 'GET', pattern: new RegExp('^/api/db/([a-f0-9]{12})$'), handler: apiPipsDbRead, keys: ['id'] },
+  { method: 'PUT', pattern: new RegExp('^/api/db/([a-f0-9]{12})$'), handler: apiPipsDbWrite, keys: ['id'] },
+  { method: 'DELETE', pattern: new RegExp('^/api/db/([a-f0-9]{12})$'), handler: apiPipsDbRemove, keys: ['id'] },
+  { method: 'POST', pattern: new RegExp('^/api/db/([a-f0-9]{12})/line$'), handler: apiPipsDbEditLine, keys: ['id'] },
+  { method: 'POST', pattern: new RegExp('^/api/db/([a-f0-9]{12})/move$'), handler: apiPipsDbMove, keys: ['id'] },
+  { method: 'POST', pattern: new RegExp('^/api/db/([a-f0-9]{12})/restore$'), handler: apiPipsDbRestore, keys: ['id'] },
+  { method: 'POST', path: '/api/devices', handler: apiDevicesHeartbeat },
+  { method: 'GET', path: '/api/devices', handler: apiDevicesList },
+  { method: 'DELETE', pattern: new RegExp('^/api/devices/([A-Za-z0-9_-]{8,64})$'), handler: apiDevicesRemove, keys: ['id'] },
+  { method: 'GET', path: '/api/social/users', handler: apiSocialUsers },
+  { method: 'POST', path: '/api/social/follow', handler: apiSocialFollow },
+  { method: 'POST', path: '/api/social/unfollow', handler: apiSocialUnfollow },
+  { method: 'GET', path: '/api/social/inbox', handler: apiSocialInbox },
+  { method: 'GET', path: '/api/social/notifications', handler: apiSocialNotifications },
+  { method: 'POST', path: '/api/social/notifications/read', handler: apiSocialNotificationsRead },
+  { method: 'POST', path: '/api/social/chat', handler: apiSocialSend },
+  { method: 'POST', path: '/api/social/chat/like', handler: apiSocialLike },
+  { method: 'GET', pattern: new RegExp(`^/api/social/chat/(${USERNAME_RE.source.slice(1, -1)})$`), handler: apiSocialThread, keys: ['user'] },
+  { method: 'GET', pattern: new RegExp(`^/api/social/avatar/(${USERNAME_RE.source.slice(1, -1)})$`), handler: apiSocialAvatarGet, keys: ['user'] },
+  { method: 'PUT', path: '/api/social/avatar', handler: apiSocialAvatarPut },
+  { method: 'POST', path: '/api/social/report', handler: apiSocialReport },
   { method: 'GET', pattern: new RegExp(`^/u/(${TOKEN})$`), handler: pageUploadLink },
   { method: 'POST', pattern: new RegExp(`^/u/(${TOKEN})/upload$`), handler: postUploadLink, csrfExempt: true },
   // ---- Tube: channels and published videos. All behind login, like the rest of the app.
