@@ -44,6 +44,41 @@ export const QWEN3_8B_GEOMETRY = {
   overheadBytes: 805306368,       // 768 MiB OS + runtime overhead beyond buffers
 };
 
+// LFM2-350M (LiquidAI), from the published config.json: 16 layers of which 6
+// are full attention (full_attn_idxs [2,5,8,10,12,14]) and 10 are short conv
+// blocks with a tiny constant state (conv_L_cache 3), 16 heads / 8 kv heads,
+// head_dim 64 (hidden 1024).
+export const LFM2_350M_GEOMETRY = {
+  layers: 16,
+  fullAttentionLayers: 6,    // exact count, not an interval
+  kvHeads: 8,
+  headDim: 64,
+  linearKeyHeads: 0,
+  linearValueHeads: 0,
+  linearHeadDim: 0,
+  kvBytesPerElement: 2,
+  ssmBytesPerElement: 4,
+  computeBufferBytes: 134217728,  // 128 MiB compute/scratch for a 350M
+  overheadBytes: 805306368,       // 768 MiB OS + runtime overhead beyond buffers
+  constantStateBytes: 1048576,    // ~1 MiB margin for the 10 short-conv states
+};
+
+// Qwen2.5-Coder-1.5B (dense qwen2), from the published config.json: 28 layers,
+// all full attention, 12 heads / 2 kv heads, head_dim 128 (hidden 1536).
+export const QWEN25_1_5B_GEOMETRY = {
+  layers: 28,
+  fullAttentionInterval: 1,
+  kvHeads: 2,
+  headDim: 128,
+  linearKeyHeads: 0,
+  linearValueHeads: 0,
+  linearHeadDim: 0,
+  kvBytesPerElement: 2,
+  ssmBytesPerElement: 4,
+  computeBufferBytes: 201326592,  // 192 MiB compute/scratch for a 1.5B
+  overheadBytes: 805306368,       // 768 MiB OS + runtime overhead beyond buffers
+};
+
 // Geometry used for memory estimation. Values come from the verified base-model
 // config.json (text_config.*) — measured inputs, not guesses.
 export const GEOMETRY = {
@@ -68,6 +103,13 @@ export const GEOMETRY = {
 //    file huihui-ai.Qwen3-8B-abliterated.Q2_K.gguf, 3,281,728,768 bytes,
 //    sha256 from HF lfs.oid, general.architecture = qwen3, Apache-2.0.
 //    Flat repo layout (no Q2_K/ subdirectory).
+//  - lfm2-350m and qwen25-coder-1-5b: verified 2026-10-13 (see below).
+//
+// NOT in the registry on purpose: unsloth/Qwen-Image-2.1-GGUF
+// (qwen-image-2.1-Q5_K_M.gguf, 5,390,223,072 bytes) - its GGUF header has no
+// general.architecture because it is a diffusion IMAGE-generation model, not a
+// text model; llama-server cannot chat with it (no /v1/chat/completions
+// support for that arch), so adding it would be a fake promise.
 export const MODELS = {
   'qwen3-27b': {
     id: 'qwen3-27b',
@@ -86,6 +128,41 @@ export const MODELS = {
     architecture: 'qwen3',
     license: 'apache-2.0',
     geometry: QWEN3_8B_GEOMETRY,
+  },
+  // Verified 2026-10-13 against unsloth/LFM2-350M-GGUF (public, flat layout):
+  // file LFM2-350M-F16.gguf, 711,482,080 bytes, sha256 from HF lfs.oid,
+  // general.architecture = lfm2 (llama.cpp b11574 supports LLM_ARCH_LFM2 -
+  // verified in src/llama-arch.cpp at that tag), HF license tag: other
+  // (LiquidAI LFM Open License). Base config: 16 layers, 6 full-attention
+  // (full_attn_idxs [2,5,8,10,12,14]), 16 heads / 8 kv heads, head_dim 64.
+  'lfm2-350m': {
+    id: 'lfm2-350m',
+    label: 'LFM2 350M (LiquidAI/unsloth)',
+    repo: 'unsloth/LFM2-350M-GGUF',
+    quant: 'F16',
+    path: 'LFM2-350M-F16.gguf',
+    sizeBytes: 711482080,
+    sha256: 'eab26c871ba936f60f6990f5ed704e04e75cdc2bb959338241b8c60353a8da16',
+    architecture: 'lfm2',
+    license: 'other (LFM Open License)',
+    geometry: LFM2_350M_GEOMETRY,
+  },
+  // Verified 2026-10-13 against RodeoImageGeneration/...-DPO-i1-GGUF
+  // (public, flat layout): file .i1-Q6_K.gguf, 1,272,740,224 bytes, sha256
+  // from HF lfs.oid, general.architecture = qwen2, no license declared on HF.
+  // Base config: 28 layers, all full attention, 12 heads / 2 kv heads,
+  // head_dim 128 (hidden 1536).
+  'qwen25-coder-1-5b': {
+    id: 'qwen25-coder-1-5b',
+    label: 'Qwen2.5 Coder 1.5B DPO (Rodeo)',
+    repo: 'RodeoImageGeneration/Qwen2.5-Coder-1.5B-Unsensored-DPO-i1-GGUF',
+    quant: 'i1-Q6_K',
+    path: 'Qwen2.5-Coder-1.5B-Unsensored-DPO.i1-Q6_K.gguf',
+    sizeBytes: 1272740224,
+    sha256: '37ca6eece0e88d74a0f1eb2d42e42c12d5061b161672567a08da6c4ebe3ef6d6',
+    architecture: 'qwen2',
+    license: 'unknown (not declared on HF)',
+    geometry: QWEN25_1_5B_GEOMETRY,
   },
 };
 
@@ -131,6 +208,9 @@ export function fmtBytes(n) {
 }
 
 export function fullAttentionLayerCount(g = GEOMETRY) {
+  // Irregular layouts (e.g. LFM2 mixes conv and attention blocks) declare the
+  // exact count instead of an interval.
+  if (Number.isInteger(g.fullAttentionLayers)) return g.fullAttentionLayers;
   const interval = Math.max(1, g.fullAttentionInterval);
   return Math.ceil(g.layers / interval);
 }
@@ -145,6 +225,8 @@ export function kvCacheBytes(ctx, g = GEOMETRY) {
 // Recurrent state: [value heads x key head dim x value head dim] float32 per
 // linear layer, constant regardless of context length.
 export function linearStateBytes(g = GEOMETRY) {
+  // Constant per-model state (e.g. short-conv layers) can be precomputed.
+  if (Number.isInteger(g.constantStateBytes)) return g.constantStateBytes;
   const linearLayers = g.layers - fullAttentionLayerCount(g);
   return linearLayers * g.linearValueHeads * g.linearHeadDim * g.linearHeadDim * g.ssmBytesPerElement;
 }

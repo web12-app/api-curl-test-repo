@@ -26,6 +26,9 @@ const flag = (name, fallback) => {
 };
 const PROMPT = flag('--prompt', 'What is the capital of France? Answer with just the city name.');
 const OUT_JSON = flag('--out', 'chat-e2e-result.json');
+// What a REAL reply must contain (case-insensitive). Defaults to Paris for
+// the capital-of-France prompt; override with --expect for other prompts.
+const EXPECT_TEXT = flag('--expect', 'Paris');
 // Optional model selection: sent through the real /api/chat body. The boot
 // model can be chosen separately with CHAT_DEFAULT_MODEL (registry id).
 const REQUESTED_MODEL = flag('--model', '');
@@ -157,6 +160,7 @@ async function main() {
   const result = {
     status: 'success',
     prompt: PROMPT,
+    expected_substring: EXPECT_TEXT,
     requested_model: REQUESTED_MODEL || null,
     loaded_model: view.result.model || status.loaded_model || null,
     reply,
@@ -177,10 +181,10 @@ async function main() {
   console.log(`result written to ${OUT_JSON}`);
 
   if (!reply.trim()) throw new Error('the model returned an empty reply');
-  if (!/paris/i.test(reply)) {
-    throw new Error(`the reply does not answer the prompt: ${JSON.stringify(reply.slice(0, 200))}`);
+  if (!new RegExp(EXPECT_TEXT.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(reply)) {
+    throw new Error(`the reply does not contain the expected text "${EXPECT_TEXT}": ${JSON.stringify(reply.slice(0, 200))}`);
   }
-  log(el(), '5. REAL reply verified (contains "Paris")');
+  log(el(), `5. REAL reply verified (contains "${EXPECT_TEXT}")`);
 
   server.closeAllConnections();
   await new Promise((r) => server.close(r)); // also stops the supervised llama-server
