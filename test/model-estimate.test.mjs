@@ -19,10 +19,10 @@ test('verified model constants are the checked facts', () => {
   assert.equal(MODEL.license, 'apache-2.0');
 });
 
-test('model registry holds the four verified chat models', () => {
+test('model registry holds the five verified chat models', () => {
   assert.deepEqual(
     Object.keys(MODELS),
-    ['qwen3-27b', 'huihui-qwen3-8b', 'lfm2-350m', 'qwen25-coder-1-5b'],
+    ['qwen3-27b', 'huihui-qwen3-8b', 'lfm2-350m', 'qwen25-coder-1-5b', 'ministral-3-14b'],
   );
   assert.equal(DEFAULT_MODEL_ID, 'qwen3-27b');
   assert.equal(modelById('qwen3-27b').repo, 'DevQuasar/Qwen.Qwen3.8-27B-GGUF');
@@ -179,4 +179,22 @@ test('validateInputs enforces context and token ranges', () => {
   assert.equal(validateInputs({ prompt: 'x', max_tokens: 0 }).errors[0].code, 'BAD_MAX_TOKENS');
   assert.equal(validateInputs({ prompt: 'x', context_length: 4096, max_tokens: 64 }).ok, true);
   assert.equal(LIMITS.maxPromptChars, 16384);
+});
+
+test('ministral-3-14b is a verified mistral3 entry with dense geometry', () => {
+  const m = modelById('ministral-3-14b');
+  assert.equal(m.repo, 'unsloth/Ministral-3-14B-Instruct-2512-GGUF');
+  assert.equal(m.path, 'Ministral-3-14B-Instruct-2512-UD-IQ2_XXS.gguf');
+  assert.equal(m.sizeBytes, 4057379520);
+  assert.equal(m.architecture, 'mistral3');
+  assert.equal(m.license, 'apache-2.0');
+  assert.equal(/^[0-9a-f]{64}$/.test(m.sha256), true);
+  assert.equal(m.geometry.layers, 40);
+  assert.equal(m.geometry.kvHeads, 8);
+  assert.equal(m.geometry.headDim, 128);
+  // The estimate must exceed the file size (weights) but fit a 16 GiB runner
+  // at the chat context with room for the site itself.
+  const req = requiredBytesForModel(m, 1024);
+  assert.ok(req > m.sizeBytes, 'estimate must exceed the file size');
+  assert.ok(req < 6 * 1024 ** 3, `unexpected Ministral estimate ${req}`);
 });

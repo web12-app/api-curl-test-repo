@@ -160,6 +160,10 @@ test('chat status requires login and reports the stub runtime as ready', async (
     assert.equal(body.data.enabled, true);
     assert.equal(body.data.state, 'ready');
     assert.equal(typeof body.data.context, 'number');
+    // The model release cache rides the status (data-repo credentials exist in this env).
+    assert.deepEqual(body.data.cache, { enabled: true, publishing: [] });
+    // The runtime log tail is exposed for transparency (no secrets are logged).
+    assert.ok(Array.isArray(body.data.log_tail));
   } finally {
     await app.close();
   }
@@ -340,7 +344,7 @@ test('chat status exposes the verified model registry and the loaded model', asy
     const body = (await res.json()).data;
     assert.deepEqual(
       body.models.map((m) => m.id),
-      ['qwen3-27b', 'huihui-qwen3-8b', 'lfm2-350m', 'qwen25-coder-1-5b'],
+      ['qwen3-27b', 'huihui-qwen3-8b', 'lfm2-350m', 'qwen25-coder-1-5b', 'ministral-3-14b'],
       'the old and all newer models are selectable',
     );
     const huihui = body.models.find((m) => m.id === 'huihui-qwen3-8b');

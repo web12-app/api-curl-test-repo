@@ -79,6 +79,23 @@ export const QWEN25_1_5B_GEOMETRY = {
   overheadBytes: 805306368,       // 768 MiB OS + runtime overhead beyond buffers
 };
 
+// Ministral-3-14B-Instruct-2512 (dense mistral3), from the published text
+// config.json: 40 layers, all full attention (sliding_window = None),
+// 32 query heads / 8 kv heads, head_dim 128 (hidden 5120).
+export const MINISTRAL3_14B_GEOMETRY = {
+  layers: 40,
+  fullAttentionInterval: 1,
+  kvHeads: 8,
+  headDim: 128,
+  linearKeyHeads: 0,
+  linearValueHeads: 0,
+  linearHeadDim: 0,
+  kvBytesPerElement: 2,
+  ssmBytesPerElement: 4,
+  computeBufferBytes: 536870912,  // 512 MiB compute/scratch for a 14B
+  overheadBytes: 805306368,       // 768 MiB OS + runtime overhead beyond buffers
+};
+
 // Geometry used for memory estimation. Values come from the verified base-model
 // config.json (text_config.*) — measured inputs, not guesses.
 export const GEOMETRY = {
@@ -104,6 +121,7 @@ export const GEOMETRY = {
 //    sha256 from HF lfs.oid, general.architecture = qwen3, Apache-2.0.
 //    Flat repo layout (no Q2_K/ subdirectory).
 //  - lfm2-350m and qwen25-coder-1-5b: verified 2026-10-13 (see below).
+//  - ministral-3-14b: verified 2026-10-13 (see below).
 //
 // NOT in the registry on purpose: unsloth/Qwen-Image-2.1-GGUF
 // (qwen-image-2.1-Q5_K_M.gguf, 5,390,223,072 bytes) - its GGUF header has no
@@ -163,6 +181,27 @@ export const MODELS = {
     architecture: 'qwen2',
     license: 'unknown (not declared on HF)',
     geometry: QWEN25_1_5B_GEOMETRY,
+  },
+  // Verified 2026-10-13 against unsloth/Ministral-3-14B-Instruct-2512-GGUF
+  // (public, not gated, flat layout): file
+  // Ministral-3-14B-Instruct-2512-UD-IQ2_XXS.gguf, 4,057,379,520 bytes,
+  // sha256 from the HF tree API lfs.oid, GGUF header read via HTTP range
+  // request: general.architecture = mistral3, quantized_by = Unsloth.
+  // llama.cpp b11574 supports LLM_ARCH_MISTRAL3 ("mistral3") - verified in
+  // src/llama-arch.cpp at that tag. Base config (unsloth/Ministral-3-14B-
+  // Instruct-2512): 40 layers, all full attention, 32 heads / 8 kv heads,
+  // head_dim 128. HF license tag: apache-2.0.
+  'ministral-3-14b': {
+    id: 'ministral-3-14b',
+    label: 'Ministral 3 14B Instruct (unsloth)',
+    repo: 'unsloth/Ministral-3-14B-Instruct-2512-GGUF',
+    quant: 'UD-IQ2_XXS',
+    path: 'Ministral-3-14B-Instruct-2512-UD-IQ2_XXS.gguf',
+    sizeBytes: 4057379520,
+    sha256: 'c55e56686620f9c5135c02197965a696950742028f3618e11acf1cff4e0582d1',
+    architecture: 'mistral3',
+    license: 'apache-2.0',
+    geometry: MINISTRAL3_14B_GEOMETRY,
   },
 };
 
