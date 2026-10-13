@@ -20,7 +20,7 @@ QUANT="${QUANT:-Q2_K}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-}"
 # Architectures the pinned llama.cpp runtime (b11574) can load.
 # lfm2 verified present at that tag: LLM_ARCH_LFM2 in src/llama-arch.cpp.
-SUPPORTED_ARCHS="${SUPPORTED_ARCHS:-qwen35 qwen35moe qwen3next qwen3 qwen2 qwen2vl qwen2audio qwen2moe lfm2 lfm2moe}"
+SUPPORTED_ARCHS="${SUPPORTED_ARCHS:-qwen35 qwen35moe qwen3next qwen3 qwen2 qwen2vl qwen2audio qwen2moe lfm2 lfm2moe mistral3}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }

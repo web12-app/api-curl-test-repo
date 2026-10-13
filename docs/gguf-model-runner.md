@@ -97,6 +97,12 @@ says so.
 4. Capacity: max 2 concurrent generations, max 2 per user (`429 MODEL_BUSY`).
    Messages ≤ 8 000 chars, last 16 exchanges sent as history. Jobs are
    per-user private, kept 30 minutes, never persisted.
+5. The same runtime also backs the **OpenAI-compatible `/v1` endpoints**
+   (`src/openai-compat.js`): `GET /v1/models` lists the verified registry
+   (the in-memory model carries `loaded: true`) and `POST /v1/chat/completions`
+   runs the identical select + generate path, with honest errors. Optional
+   proxy mode (`AI_BASE_URL`) forwards to an external provider instead. See
+   `docs/api.md` for the full contract.
 
 ### Enabling on the live tunnel
 

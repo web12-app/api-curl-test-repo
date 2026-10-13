@@ -22,6 +22,7 @@ const { USERNAME_RE } = require('./paths');
 const { ModelChat } = require('./model-chat');
 const { ChatJobs } = require('./chat-jobs');
 const { ModelCache } = require('./model-cache');
+const { OpenAiCompat, sendV1Error, sendV1Json } = require('./openai-compat');
 const pages = require('./pages');
 const offlinePage = require('./offline-page');
 
@@ -117,7 +118,37 @@ function buildModelChat(env, overrides = {}) {
   const cache = overrides.modelCache !== undefined ? overrides.modelCache : buildModelCache(env, overrides);
   const chat = new ModelChat(env, { upstreamBase: overrides.upstreamBase, cache });
   const jobs = new ChatJobs(chat, { now: overrides.now });
-  return { chat, jobs };
+  // OpenAI-compatible /v1 endpoints: local llama.cpp runtime by default,
+  // or a transparent proxy when AI_BASE_URL points at an external provider.
+  const v1 = new OpenAiCompat({
+    chat,
+    upstreamBase: overrides.aiBaseUrl !== undefined ? overrides.aiBaseUrl : env.AI_BASE_URL,
+    upstreamApiKey: env.AI_API_KEY,
+    upstreamModelsPath: env.AI_MODELS_PATH,
+    apiKey: env.V1_API_KEY,
+    maxConcurrent: Number.isInteger(Number(env.AI_MAX_CONCURRENT)) && Number(env.AI_MAX_CONCURRENT) >= 1
+      ? Number(env.AI_MAX_CONCURRENT)
+      : 2,
+    now: overrides.now,
+    fetchImpl: overrides.aiFetch,
+  });
+  return { chat, jobs, v1 };
+}
+
+// The release cache for chat models: every downloaded model is saved once as
+// release assets in the private data repository (tag model-cache/<id>), and
+// later starts restore it from there instead of re-downloading ~10 GiB from
+// the Hugging Face CDN. Active whenever the data-repo credentials exist;
+// MODEL_CACHE=off turns it off. Cache problems degrade to the normal download.
+function buildModelCache(env, overrides = {}) {
+  if (!env.GITHUB_TOKEN || !env.PRIVATE_DATA_REPO || env.MODEL_CACHE === 'off') return null;
+  const releases = overrides.modelCacheReleases || new GitHubReleases({
+    token: env.GITHUB_TOKEN,
+    repo: env.PRIVATE_DATA_REPO,
+    apiBase: overrides.githubApiBase,
+    uploadBase: overrides.githubUploadBase,
+  });
+  return new ModelCache({ releases, log: (line) => console.log(`[model-cache] ${line}`) });
 }
 
 // The release cache for chat models: every downloaded model is saved once as
@@ -1099,6 +1130,13 @@ function publicChatStatus(ctx) {
           validated_live: st.model.validated_live,
         }
       : null,
+    // Model release cache (one-time download, fast auto-load later).
+    cache: {
+      enabled: Boolean(st.cache && st.cache.enabled),
+      publishing: st.cache && Array.isArray(st.cache.publishing) ? st.cache.publishing : [],
+    },
+    // Last runtime lines (provisioning, llama-server boot). No secrets are logged.
+    log_tail: Array.isArray(st.log_tail) ? st.log_tail : [],
   };
 }
 
@@ -1117,6 +1155,37 @@ async function pageChat(ctx) {
 async function apiChatStatus(ctx) {
   await requireUser(ctx);
   ok(ctx, 200, publicChatStatus(ctx));
+}
+
+// ---- OpenAI-compatible /v1 (no session; optional V1_API_KEY bearer auth)
+
+async function apiV1Models(ctx) {
+  if (!ctx.chat.v1.authorize(ctx.req)) {
+    return sendV1Json(ctx.res, 401, OpenAiCompat.errorBody('invalid api key.', 'auth_error', 'INVALID_API_KEY'));
+  }
+  try {
+    sendV1Json(ctx.res, 200, await ctx.chat.v1.listModels());
+  } catch (err) {
+    sendV1Error(ctx.res, err);
+  }
+}
+
+async function apiV1ChatCompletions(ctx) {
+  if (!ctx.chat.v1.authorize(ctx.req)) {
+    return sendV1Json(ctx.res, 401, OpenAiCompat.errorBody('invalid api key.', 'auth_error', 'INVALID_API_KEY'));
+  }
+  let body;
+  try {
+    body = await readChatJsonBody(ctx);
+  } catch (err) {
+    return sendV1Error(ctx.res, err);
+  }
+  try {
+    await ctx.chat.v1.chatCompletions(ctx.req, ctx.res, body);
+  } catch (err) {
+    if (!ctx.res.headersSent) sendV1Error(ctx.res, err);
+    else ctx.res.end();
+  }
 }
 
 async function apiChatSend(ctx) {
@@ -1218,6 +1287,8 @@ const ROUTES = [
   // ---- Model chat: page and JSON API. All behind login, like the rest of the app.
   { method: 'GET', path: '/chat', handler: pageChat },
   { method: 'GET', path: '/api/chat/status', handler: apiChatStatus },
+  { method: 'GET', path: '/v1/models', handler: apiV1Models },
+  { method: 'POST', path: '/v1/chat/completions', handler: apiV1ChatCompletions, csrfExempt: true },
   { method: 'POST', path: '/api/chat', handler: apiChatSend },
   { method: 'GET', pattern: new RegExp(`^/api/chat/jobs/${UUID}$`), handler: apiChatJob, keys: ['jobId'] },
   { method: 'DELETE', pattern: new RegExp(`^/api/chat/jobs/${UUID}$`), handler: apiChatCancel, keys: ['jobId'] },
@@ -1271,7 +1342,8 @@ async function dispatch(req, res, auth, corsOrigins, modelChat) {
   const ctx = { req, res, url, auth, chat: modelChat, ip: clientIp(req, auth), params: {} };
   const method = req.method === 'HEAD' ? 'GET' : req.method;
 
-  const isApi = url.pathname.startsWith('/api/');
+  // /v1/* is the OpenAI-compatible surface: same CORS treatment as /api/*.
+  const isApi = url.pathname.startsWith('/api/') || url.pathname.startsWith('/v1/');
   const origin = req.headers.origin;
   const corsAllowed = isApi && typeof origin === 'string' && corsOrigins.includes(origin);
   if (isApi) res.setHeader('Vary', 'Origin');

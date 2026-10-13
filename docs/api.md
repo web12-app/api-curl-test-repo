@@ -252,6 +252,39 @@ If the runtime failed earlier, `POST /api/chat` makes one bounded self-heal atte
 
 Replies skip the Qwen3 thinking block (`enable_thinking: false`) so a short answer returns in seconds instead of half a minute on the runner's CPU; `MODEL_THINKING=1` restores the reasoning text, and any stray `<think>` block is still split off the visible text.
 
+## OpenAI-compatible API (/v1)
+
+Standard OpenAI-style endpoints over the same real backend as the model chat. No session is required. When `V1_API_KEY` is set, every `/v1/*` request must send `Authorization: Bearer <V1_API_KEY>`; when it is unset the endpoints are open. Errors always use the OpenAI error shape `{"error": {"message", "type", "code"}}`.
+
+Two modes (`src/openai-compat.js`):
+
+- **local** (default): the provider is this server's llama.cpp `llama-server`. `GET /v1/models` lists the verified model registry (`owned_by: "local"`, the model currently in memory carries `"loaded": true`); `POST /v1/chat/completions` hot-swaps to the requested registry model exactly like the site chat and generates on the local runtime. A model id that cannot actually load returns an honest error - it is never claimed as running just because it is listed.
+- **proxy** (`AI_BASE_URL` set): requests forward to an external OpenAI-compatible provider. The models list is preserved verbatim from the provider (no invented ids); upstream failures surface as `502 UPSTREAM_UNAVAILABLE` / `UPSTREAM_ERROR` / `UPSTREAM_AUTH` (provider auth) / `504 UPSTREAM_TIMEOUT` / `502 UPSTREAM_INVALID` (non-JSON).
+
+| Method and path | Body | Success | Errors |
+| --- | --- | --- | --- |
+| `GET /v1/models` | none | `200`, `{"object":"list","data":[{"id","object":"model","created","owned_by"}]}` | `401 INVALID_API_KEY`, `503 AI_NOT_CONFIGURED`, `502/504` proxy upstream errors |
+| `POST /v1/chat/completions` | OpenAI body: `{"model?", "messages":[{role: system\|user\|assistant, content}], "stream"?, "max_tokens"?, "temperature"?}` | `200` chat.completion (non-stream) or `text/event-stream` chunks ending with `data: [DONE]`. Messages: at most 33 entries, each ≤ 8 000 chars, last message non-empty user text; `max_tokens` 1-4096. Streaming thinking text rides `delta.reasoning_content` / `message.reasoning_content`. | `400 INVALID_BODY`, `400 BAD_MESSAGES`, `400 EMPTY_PROMPT`, `400 PROMPT_TOO_LONG`, `400 BAD_MAX_TOKENS`, `400 BAD_MODEL` / `400 MODEL_NOT_AVAILABLE`, `415`, `429 MODEL_BUSY`, `401 INVALID_API_KEY`, `503 AI_NOT_CONFIGURED`, `503 MODEL_NOT_READY`, `504 GENERATION_TIMEOUT`, proxy `502/504` |
+
+Example:
+
+```sh
+curl -i https://YOUR_HOST/v1/models
+curl -X POST https://YOUR_HOST/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "MODEL_ID_FROM_LIST", "messages": [{"role": "user", "content": "Reply with exactly: API WORKING"}], "stream": false}'
+```
+
+Configuration (environment, following the repository's existing conventions):
+
+| variable | meaning |
+| --- | --- |
+| `V1_API_KEY` | optional inbound bearer key for `/v1/*`; unset = open |
+| `AI_BASE_URL` | external OpenAI-compatible provider base URL (switches to proxy mode) |
+| `AI_API_KEY` | optional bearer key for the upstream provider (never logged) |
+| `AI_MODELS_PATH` | optional upstream models path (default `/v1/models`) |
+| `AI_MAX_CONCURRENT` | local-mode generation slots (default 2, mirroring the site chat) |
+
 ## Status codes at a glance
 
 | Code | Meaning in this API |
