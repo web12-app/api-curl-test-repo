@@ -62,12 +62,23 @@ export default function ChatPage({ boot }) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false); // a job of ours is queued/running
   const [sendError, setSendError] = useState('');
+  const [selectedModel, setSelectedModel] = useState(initial.loaded_model || initial.default_model || '');
   const jobRef = useRef(null);
   const logRef = useRef(null);
   const exchangesRef = useRef(exchanges);
   exchangesRef.current = exchanges;
 
   const active = status.enabled && (status.state === 'ready' || status.state === 'loading' || status.state === 'validating' || status.state === 'checking-memory');
+  const models = Array.isArray(status.models) ? status.models : [];
+  const loadedModel = status.loaded_model || null;
+
+  // Once the server reports its model registry, make sure the selector holds
+  // a real model id (the initial boot data may predate the registry).
+  useEffect(() => {
+    if (!models.length) return;
+    if (selectedModel && models.some((m) => m.id === selectedModel)) return;
+    setSelectedModel(loadedModel || status.default_model || models[0].id);
+  }, [models.length, loadedModel, status.default_model, selectedModel]);
 
   // While the runtime is not ready yet, keep asking for status so the page
   // flips to "ready" on its own (the model may be minutes away when the
@@ -110,6 +121,7 @@ export default function ChatPage({ boot }) {
         a.text = jobView.result.text;
         if (jobView.result.reasoning) a.reasoning = jobView.result.reasoning;
         const bits = [];
+        if (jobView.result.model) bits.push(jobView.result.model);
         if (jobView.result.tokens && jobView.result.tokens.completion) bits.push(jobView.result.tokens.completion + ' tokens');
         if (jobView.result.elapsed_ms) bits.push((jobView.result.elapsed_ms / 1000).toFixed(1) + ' s');
         a.meta = bits.join(' \u00b7 ');
@@ -154,7 +166,7 @@ export default function ChatPage({ boot }) {
       const res = await api('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, history, max_tokens: undefined }),
+        body: JSON.stringify({ message, history, max_tokens: undefined, model: selectedModel || undefined }),
       });
       if (!res.ok || !res.body || !res.body.data) {
         setExchanges((prev) => {
@@ -209,6 +221,28 @@ export default function ChatPage({ boot }) {
           </div>
         )}
         {status.state === 'error' && status.error && <div className="chat-error">{status.error.message}</div>}
+
+        {status.enabled !== false && models.length > 0 && (
+          <div className="chat-modelbar">
+            <label className="chat-model-label" htmlFor="chat-model-select">Model</label>
+            <select
+              id="chat-model-select"
+              className="chat-select"
+              value={selectedModel || ''}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              disabled={busy || !active}
+            >
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label + ' \u00b7 ' + (m.quant || 'GGUF') + (fmtBytes(m.bytes) ? ' \u00b7 ' + fmtBytes(m.bytes) : '') + (m.id === loadedModel ? ' \u2014 loaded' : '')}
+                </option>
+              ))}
+            </select>
+            {active && selectedModel && loadedModel && selectedModel !== loadedModel && (
+              <span className="chat-switch-hint">the next message switches the runtime to this model</span>
+            )}
+          </div>
+        )}
 
         <div className="chat-log" ref={logRef}>
           {exchanges.length === 0 && (

@@ -26,6 +26,9 @@ const flag = (name, fallback) => {
 };
 const PROMPT = flag('--prompt', 'What is the capital of France? Answer with just the city name.');
 const OUT_JSON = flag('--out', 'chat-e2e-result.json');
+// Optional model selection: sent through the real /api/chat body. The boot
+// model can be chosen separately with CHAT_DEFAULT_MODEL (registry id).
+const REQUESTED_MODEL = flag('--model', '');
 
 const READY_DEADLINE_MS = 50 * 60 * 1000;   // provisioning: runtime + 10.7 GB model download
 const JOB_DEADLINE_MS = 20 * 60 * 1000;     // generation at ~1.7 tok/s on 4 vCPU
@@ -45,6 +48,7 @@ async function main() {
       COOKIE_SECURE: '0',
       // The real chat configuration, exactly what the live tunnel uses when enabled:
       CHAT_AUTOPROVISION: '1',
+      CHAT_DEFAULT_MODEL: process.env.CHAT_DEFAULT_MODEL || '',
       HF_REPO: process.env.HF_REPO || 'DevQuasar/Qwen.Qwen3.8-27B-GGUF',
       MODEL_QUANT: process.env.MODEL_QUANT || process.env.QUANT || 'Q2_K',
       LLAMA_REF: process.env.LLAMA_REF || 'b11574',
@@ -100,11 +104,23 @@ async function main() {
   }
   log(el(), `2. model ready: ${JSON.stringify(status.model)}`);
 
+  // The boot model must match the requested one (when CHAT_DEFAULT_MODEL is
+  // used, the runtime loads it directly; a different id would mean the swap
+  // path is being tested unintentionally).
+  if (REQUESTED_MODEL && status.loaded_model && status.loaded_model !== REQUESTED_MODEL) {
+    log(el(), `2. note: runtime booted with "${status.loaded_model}"; sending model "${REQUESTED_MODEL}" to exercise the selection/swap path`);
+  }
+  if (REQUESTED_MODEL && !(status.models || []).some((m) => m.id === REQUESTED_MODEL)) {
+    throw new Error(`requested model "${REQUESTED_MODEL}" is not in the status registry: ${JSON.stringify((status.models || []).map((m) => m.id))}`);
+  }
+
   // 3. Send a real prompt through the real chat API.
   const send = await fetch(`${base}/api/chat`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: PROMPT }),
+    body: JSON.stringify(REQUESTED_MODEL
+      ? { message: PROMPT, model: REQUESTED_MODEL }
+      : { message: PROMPT }),
   });
   if (send.status !== 202) {
     throw new Error(`chat send failed: ${send.status} ${await send.text()}`);
@@ -132,12 +148,17 @@ async function main() {
     throw new Error(`job did not succeed: ${JSON.stringify(view).slice(0, 800)}`);
   }
   const reply = view.result.text || '';
-  log(el(), `4. job done: ${reply.length} chars in ${view.result.elapsed_ms} ms`);
+  log(el(), `4. job done: ${reply.length} chars in ${view.result.elapsed_ms} ms (model: ${view.result.model || 'n/a'})`);
+  if (REQUESTED_MODEL && view.result.model !== REQUESTED_MODEL) {
+    throw new Error(`the job ran on "${view.result.model}" instead of the requested "${REQUESTED_MODEL}"`);
+  }
 
   // 5. Assert the reply is real and actually answers the prompt.
   const result = {
     status: 'success',
     prompt: PROMPT,
+    requested_model: REQUESTED_MODEL || null,
+    loaded_model: view.result.model || status.loaded_model || null,
     reply,
     reply_chars: reply.length,
     reasoning_chars: (view.result.reasoning || '').length,

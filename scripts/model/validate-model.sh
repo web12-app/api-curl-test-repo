@@ -41,11 +41,27 @@ quant = os.environ["QUANT"]
 meta = json.loads(os.environ["META_JSON"])
 tree = json.loads(os.environ["TREE_JSON"])
 sibs = [s.get("rfilename", "") for s in meta.get("siblings", [])]
-pat = re.compile(r"(^|/)" + re.escape(quant) + r"(/|.*\.gguf$)")
-hits = [s for s in sibs if pat.search(s) and s.endswith(".gguf") and "mmproj" not in s and not s.startswith("mtp-")]
+
+def is_quant(name):
+    # Two verified repo layouts:
+    #   - subdirectory: Q2_K/<model>.Q2_K.gguf   (DevQuasar 27B-style)
+    #   - flat:         <model>.Q2_K.gguf        (DevQuasar 8B-style)
+    if not name.endswith(".gguf") or "mmproj" in name:
+        return False
+    base = name.rsplit("/", 1)[-1]
+    if base.startswith("mtp-"):
+        return False
+    parts = name.split("/")
+    dirquant = parts[0] if len(parts) > 1 else ""
+    return dirquant == quant or base == quant + ".gguf" or base.endswith("." + quant + ".gguf")
+
+hits = [s for s in sibs if is_quant(s)]
 if not hits:
     quants = sorted({s.split("/")[0] for s in sibs if s.endswith(".gguf") and "/" in s})
-    sys.stderr.write("FAIL: quantization '" + quant + "' not found in the repository file list. Available: " + ", ".join(quants) + "\n")
+    flat = sorted({m.group(1) for s in sibs if s.endswith(".gguf") and "/" not in s
+                   and (m := re.search(r"\.([IQ]?[0-9][A-Za-z0-9_]*)\.gguf$", s))})
+    avail = ", ".join(quants + flat) or "(no .gguf files)"
+    sys.stderr.write("FAIL: quantization '" + quant + "' not found in the repository file list. Available: " + avail + "\n")
     sys.exit(2)
 gguf = sorted(hits)[0]
 size, sha = 0, ""

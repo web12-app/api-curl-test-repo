@@ -78,7 +78,14 @@ class ChatJobs {
         throw new AppError(400, 'BAD_MAX_TOKENS', 'max_tokens must be an integer between 1 and 4096.');
       }
     }
-    return { message, history, maxTokens };
+    let model = null;
+    if (body.model !== undefined && body.model !== null && body.model !== '') {
+      if (typeof body.model !== 'string') {
+        throw new AppError(400, 'BAD_MODEL', 'model must be a model id string from /api/chat/status.');
+      }
+      model = body.model;
+    }
+    return { message, history, maxTokens, model };
   }
 
   // Creates and starts a job. Throws AppError-shaped errors for validation and
@@ -102,7 +109,7 @@ class ChatJobs {
       );
     }
     if (this.chat.state !== 'ready') {
-      throw new AppError(503, 'MODEL_NOT_READY', 'the model is still starting. Check /api/chat/status and try again soon.');
+      throw new AppError(503, 'MODEL_NOT_READY', `${this.chat.detail || 'the model is still starting'} Check /api/chat/status and try again soon.`);
     }
     if (this.activeCount() >= this.globalLimit) {
       throw new AppError(429, 'MODEL_BUSY', 'the model is already generating for other requests. Try again in a moment.');
@@ -110,11 +117,18 @@ class ChatJobs {
     if (this.activeCount(user.id) >= this.perUserLimit) {
       throw new AppError(429, 'MODEL_BUSY', 'you already have a generation running. Wait for it or cancel it first.');
     }
-    const { message, history, maxTokens } = this._validateBody(body);
+    const { message, history, maxTokens, model } = this._validateBody(body);
+    // Synchronous registry check so a bad model id is an immediate 400, not a
+    // job that fails later. (select() re-checks as the authoritative backstop.)
+    if (model && Array.isArray(this.chat.models) && this.chat.models.length
+        && !this.chat.models.some((m) => m.id === model)) {
+      throw new AppError(400, 'BAD_MODEL', `unknown model "${model}". Available models: ${this.chat.models.map((m) => m.id).join(', ')}.`);
+    }
     const job = {
       id: crypto.randomUUID(),
       userKey: user.id,
       username: user.username,
+      model,
       status: 'queued',
       createdAt: this.now(),
       updatedAt: this.now(),
@@ -139,6 +153,10 @@ class ChatJobs {
       if (est && est.LIMITS && job.message.length > est.LIMITS.maxPromptChars) {
         throw new AppError(400, 'PROMPT_TOO_LONG', `message exceeds ${est.LIMITS.maxPromptChars} characters.`);
       }
+      // Resolve the requested model first: this hot-swaps the runtime when the
+      // job targets a model other than the loaded one (serialized inside the
+      // chat, so a swap never races another job's swap).
+      const entry = await this.chat.select(job.model);
       const result = await this.chat.generate({
         messages,
         maxTokens,
@@ -149,7 +167,9 @@ class ChatJobs {
           job.updatedAt = this.now();
         },
       });
+      job.model = entry.id;
       job.result = {
+        model: entry.id,
         text: result.text,
         reasoning: result.reasoning || '',
         elapsed_ms: result.elapsed_ms,
@@ -177,6 +197,7 @@ class ChatJobs {
     const out = {
       id: job.id,
       status: job.status,
+      model: job.model || null,
       created_at: new Date(job.createdAt).toISOString(),
       partial: job.partial,
       partial_reasoning: job.partialReasoning,
