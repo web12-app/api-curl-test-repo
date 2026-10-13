@@ -739,9 +739,10 @@ const TUNNEL_CSS = `
       .tun-foot a { color: #7ee2ff; text-decoration: none; }
       .tun-foot a:hover { text-decoration: underline; }`;
 
-// The /tun landing page: download, three-step quickstart, and the list of
+// The /tun landing page: installer one-liner, quickstart, and the list of
 // currently connected tunnels. Standalone like the /app install page.
-function tunnelPage({ tunnels }) {
+function tunnelPage({ tunnels, base = '' }) {
+  const escBase = escapeHtml(base);
   const rows = tunnels
     .map(
       (t) =>
@@ -775,14 +776,14 @@ function tunnelPage({ tunnels }) {
       <section class="panel">
         <h2>Three steps</h2>
         <ol class="steps">
-          <li><span class="step-num">1</span><span>Download and unpack the client (Windows: unpack any way you like).</span></li>
-          <li><span class="step-num">2</span><span>Start it against your app's local port and pick any app name.</span></li>
+          <li><span class="step-num">1</span><span>Install the client — one line on macOS and Linux:</span></li>
+          <li><span class="step-num">2</span><span>Publish your app's local port under any app name.</span></li>
           <li><span class="step-num">3</span><span>Open <b>/tun/&lt;app-name&gt;</b> here — that URL now serves your localhost.</span></li>
         </ol>
-        <pre class="code">tar -xzf tunnel.tar.gz &amp;&amp; cd tunnel
-./tun start 5000 test
-# → https://&lt;this-server&gt;/tun/test</pre>
-        <p class="hint">Windows: use <b>node tun.js start 5000 test</b>. Other flags: <b>./tun list</b>, <b>./tun close &lt;name&gt;</b>, and <b>--server &lt;url&gt;</b> to target any other host (ngrok, Cloudflare, anything in front of this app). The /tun/&lt;name&gt; prefix is stripped before your app sees the request.</p>
+        <pre class="code">curl -fsSL ${escBase}/tunnel.sh | sh
+~/.pips-tunnel/tun start 5000 test
+# → ${escBase}/tun/test</pre>
+        <p class="hint">No curl? Download <b>tunnel.tar.gz</b> above and unpack it: <b>tar -xzf tunnel.tar.gz &amp;&amp; cd tunnel &amp;&amp; ./tun start 5000 test</b>. Windows: <b>node tun.js start 5000 test</b>. More: <b>tun list</b>, <b>tun close &lt;name&gt;</b>, and <b>--server &lt;url&gt;</b> to target any other host (ngrok, Cloudflare, anything in front of this app). The /tun/&lt;name&gt; prefix is stripped before your app sees the request.</p>
       </section>
 
       <section class="panel">

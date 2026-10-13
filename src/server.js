@@ -30,6 +30,7 @@ const { Social } = require('./social');
 const appRelease = require('./app-release');
 const { Tunnels } = require('./tunnel');
 const { clientBundle } = require('./tunnel-package');
+const { installScript } = require('./tunnel-install');
 const pages = require('./pages');
 const offlinePage = require('./offline-page');
 
@@ -1694,9 +1695,29 @@ async function apiTunnelClientTar(ctx) {
 }
 
 async function pageTunnelHome(ctx) {
-  sendHtml(ctx.res, 200, pages.tunnelPage({ tunnels: ctx.tunnel.list() }), {
+  sendHtml(ctx.res, 200, pages.tunnelPage({ tunnels: ctx.tunnel.list(), base: publicBase(ctx.req) }), {
     'Content-Security-Policy': INSTALL_PAGE_CSP,
   });
+}
+
+// The base URL as the visitor sees it: the installer and the quickstart on
+// /tun are pinned to whatever host the request actually reached, so the same
+// responses stay correct behind ngrok, Cloudflare, or localhost.
+function publicBase(req) {
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
+  if (!host) return '';
+  const local = /^(localhost|\[::1\]|127\.0\.0\.1)(:\d+)?$/i.test(host);
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || (local ? 'http' : 'https');
+  return `${proto}://${host}`;
+}
+
+// One-line installer for the tunnel client, consumed as
+// `curl -fsSL <server>/tunnel.sh | sh`. Pinned to the host it came from.
+async function apiTunnelInstallScript(ctx) {
+  send(ctx.res, 200, {
+    'Content-Type': 'text/x-shellscript; charset=utf-8',
+    'Cache-Control': 'public, max-age=60',
+  }, installScript(publicBase(ctx.req)));
 }
 
 // Raw buffer (readBody would decode utf8 and corrupt binary uploads).
@@ -1880,6 +1901,7 @@ const ROUTES = [
   { method: 'DELETE', pattern: new RegExp(`^/api/chat/jobs/${UUID}$`), handler: apiChatCancel, keys: ['jobId'] },
   // ---- Pips Tunnel: /tun/<name> publishes a localhost app (see tunnel-client/).
   { method: 'GET', path: '/tun', handler: pageTunnelHome },
+  { method: 'GET', path: '/tunnel.sh', handler: apiTunnelInstallScript },
   { method: 'GET', path: '/api/tunnel/list', handler: apiTunnelList },
   { method: 'GET', path: '/api/tunnel/poll', handler: apiTunnelPoll },
   { method: 'GET', path: '/api/tunnel/client.tar.gz', handler: apiTunnelClientTar },
