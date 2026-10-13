@@ -575,4 +575,136 @@ function errorPage(status, message, user = null) {
   return layout(`Error ${status}`, `<h1>Error ${status}</h1><p class="error">${escapeHtml(message)}</p>`, user);
 }
 
-module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, chatPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage };
+// Pips Android install page (standalone, public): an app-store-style landing page. Phone users
+// open it from a shared link, see the app header (icon, name, version/size chips), a big
+// download button for the latest signed APK, what's new, install steps, and a feature grid.
+const INSTALL_CSS = `
+      * { box-sizing: border-box; }
+      body.install { margin: 0; font-family: system-ui, sans-serif; color: #e6edf3; background: #0b1020; overflow-x: hidden; }
+      body.install a { color: #7ee2ff; }
+      .install .glow { position: fixed; width: 46rem; height: 46rem; border-radius: 50%; filter: blur(90px); opacity: .16; pointer-events: none; z-index: 0; }
+      .install .g1 { background: #2ecc71; top: -18rem; right: -14rem; }
+      .install .g2 { background: #4f8cff; bottom: -20rem; left: -16rem; }
+      .store { position: relative; z-index: 1; max-width: 30rem; margin: 0 auto; padding: 1.6rem 1rem 2.4rem; display: flex; flex-direction: column; gap: 1rem; }
+      .app-card { background: linear-gradient(160deg, #141a2e 0%, #101522 70%); border: 1px solid #262d42; border-radius: 20px; padding: 1.8rem 1.4rem 1.5rem; text-align: center; box-shadow: 0 18px 50px rgba(0,0,0,.45); }
+      .app-icon { width: 96px; height: 96px; border-radius: 22%; display: block; margin: 0 auto .9rem; box-shadow: 0 10px 28px rgba(0,0,0,.5), 0 0 0 1px #2b3550; background: #101522; }
+      .app-card h1 { margin: 0; font-size: 1.75rem; letter-spacing: -.02em; color: #fff; }
+      .app-card .tagline { margin: .35rem 0 0; color: #9aa8c0; font-size: .95rem; line-height: 1.5; }
+      .dev-row { margin: .7rem 0 0; color: #6d7a94; font-size: .82rem; display: flex; gap: .5rem; justify-content: center; flex-wrap: wrap; }
+      .dev-row b { color: #aeb9d0; font-weight: 600; }
+      .install-btn { display: flex; align-items: center; justify-content: center; gap: .55rem; margin: 1.2rem auto .8rem; max-width: 22rem; padding: .95rem 1.4rem; border-radius: 14px; background: linear-gradient(135deg, #2ecc71, #27ae60); color: #fff; font-size: 1.05rem; font-weight: 800; text-decoration: none; letter-spacing: .01em; box-shadow: 0 10px 26px rgba(46,204,113,.35); transition: transform .12s ease, box-shadow .12s ease; }
+      .install-btn:hover { transform: translateY(-2px); box-shadow: 0 14px 32px rgba(46,204,113,.45); }
+      .install-btn:active { transform: translateY(0); }
+      .install-sub { margin: 0; color: #8a97b1; font-size: .84rem; }
+      .install-sub b { color: #c6d0e2; font-weight: 600; }
+      .verify-row { margin: .9rem 0 0; display: flex; gap: .45rem; justify-content: center; flex-wrap: wrap; }
+      .vchip { display: inline-flex; align-items: center; gap: .3rem; border: 1px solid #2b3550; background: #131a2b; color: #9fb4d8; border-radius: 999px; padding: .28rem .7rem; font-size: .76rem; }
+      .vchip svg { color: #2ecc71; }
+      .panel { background: #12182a; border: 1px solid #232c44; border-radius: 16px; padding: 1.1rem 1.25rem 1.25rem; }
+      .panel h2 { margin: 0 0 .6rem; font-size: 1.02rem; color: #fff; display: flex; align-items: center; gap: .5rem; }
+      .panel h2 svg { color: #4f8cff; flex: none; }
+      .panel ul, .panel ol { margin: 0; padding-left: 1.3rem; color: #b9c4d8; font-size: .92rem; line-height: 1.65; }
+      .panel li { margin: .3rem 0; }
+      .panel li b { color: #e6edf3; font-weight: 600; }
+      .panel .hint { margin: .8rem 0 0; color: #6d7a94; font-size: .8rem; line-height: 1.55; }
+      .step-num { display: inline-flex; align-items: center; justify-content: center; width: 1.45rem; height: 1.45rem; margin-right: .1rem; border-radius: 50%; background: #1c2740; border: 1px solid #33406b; color: #8fb0ff; font-size: .78rem; font-weight: 700; vertical-align: middle; }
+      ol.steps { list-style: none; padding-left: 0; display: flex; flex-direction: column; gap: .7rem; }
+      ol.steps li { display: flex; gap: .7rem; align-items: flex-start; margin: 0; }
+      ol.steps .step-num { flex: none; margin-top: .1rem; }
+      .feat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; }
+      .feat { background: #12182a; border: 1px solid #232c44; border-radius: 14px; padding: .9rem .95rem; }
+      .feat svg { color: #2ecc71; }
+      .feat:nth-child(2n) svg { color: #4f8cff; }
+      .feat h3 { margin: .45rem 0 .2rem; font-size: .9rem; color: #eef2fa; }
+      .feat p { margin: 0; color: #8a97b1; font-size: .8rem; line-height: 1.5; }
+      .install-foot { text-align: center; color: #5c6a85; font-size: .82rem; padding: .4rem 0 0; display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+      .install-foot a { color: #7ee2ff; text-decoration: none; }
+      .install-foot a:hover { text-decoration: underline; }
+      @media (max-width: 380px) { .feat-grid { grid-template-columns: 1fr; } }`;
+
+function appInstallPage(info) {
+  const mb = info.sizeBytes ? Math.max(1, Math.round(info.sizeBytes / (1024 * 1024))) : 0;
+  const apk = escapeHtml(info.apkUrl);
+  const version = escapeHtml(info.version);
+  const updated = escapeHtml(info.updated || '');
+  const releases = escapeHtml(info.releasesUrl);
+  const dl = svg('<path d="M12 4v11"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/>', 20);
+  const shieldSm = svg('<path d="M12 2 4 5v6c0 5 3.4 8.6 8 11 4.6-2.4 8-6 8-11V5l-8-3z"/><path d="m9 12 2 2 4-4"/>', 13);
+  const iconNew = svg('<path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/>', 16);
+  const iconSteps = svg('<path d="M8 6h13M8 12h13M8 18h13"/><path d="m3 6 1 1 2-2"/><path d="m3 12 1 1 2-2"/><path d="m3 18 1 1 2-2"/>', 16);
+  const iFolder = svg('<path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6z"/>', 20);
+  const iPlay = svg('<path d="m6 4 14 8-14 8V4z"/>', 20);
+  const iChat = svg('<path d="M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5z"/><path d="M9 11h.01M12.5 11h.01M16 11h.01"/>', 20);
+  const iDoc = svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h6"/>', 20);
+  const iShield = svg('<path d="M12 2 4 5v6c0 5 3.4 8.6 8 11 4.6-2.4 8-6 8-11V5l-8-3z"/>', 20);
+  const iBolt = svg('<path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/>', 20);
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1020">
+    <title>Pips - Android app install</title>
+    <style>${INSTALL_CSS}
+    </style>
+  </head>
+  <body class="install">
+    <div class="glow g1" aria-hidden="true"></div>
+    <div class="glow g2" aria-hidden="true"></div>
+    <main class="store">
+      <section class="app-card">
+        <img class="app-icon" src="/assets/pips-logo.png" alt="Pips app icon" width="96" height="96">
+        <h1>Pips</h1>
+        <p class="tagline">Your cloud in one app — files, videos, chat &amp; docs</p>
+        <p class="dev-row"><b>web12-app</b><span>&middot;</span><span>Free</span><span>&middot;</span><span>Android</span></p>
+        <a class="install-btn" href="${apk}" rel="noopener">${dl} Download APK</a>
+        <p class="install-sub"><b>v${version}</b>${mb ? ` &middot; ${mb} MB` : ''} &middot; Android 5.0+${updated ? ` &middot; Updated ${updated}` : ''}</p>
+        <div class="verify-row">
+          <span class="vchip">${shieldSm} Signed release build</span>
+          <span class="vchip">${shieldSm} Official GitHub release</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>${iconNew} What's new</h2>
+        <ul>
+          <li><b>Full cloud connection</b> — every feature now talks to your File Vault server: files, Tube, chat, docs, devices.</li>
+          <li><b>Smoother sign-in</b> — one account works in the app and on the web, with per-device API keys.</li>
+          <li><b>Stability fixes</b> — faster startup and more reliable uploads on flaky mobile networks.</li>
+        </ul>
+      </section>
+
+      <section class="panel">
+        <h2>${iconSteps} How to install</h2>
+        <ol class="steps">
+          <li><span class="step-num">1</span><span><b>Download the APK</b> with the green button above.</span></li>
+          <li><span class="step-num">2</span><span><b>Allow installs</b> — when Android asks, permit installs from your browser ("Install unknown apps").</span></li>
+          <li><span class="step-num">3</span><span><b>Open Pips</b>, sign in or create an account, and everything syncs with the web.</span></li>
+        </ol>
+        <p class="hint">The APK is built from the official repository and signed with the release key. If a previous version is installed, this update installs over it and keeps your sign-in.</p>
+      </section>
+
+      <section class="panel">
+        <h2>${iBolt} Everything in your pocket</h2>
+        <div class="feat-grid">
+          <div class="feat">${iFolder}<h3>Your files, 2 GB each</h3><p>Upload, preview, share, and import from any link.</p></div>
+          <div class="feat">${iPlay}<h3>Tube</h3><p>Publish videos, follow channels, watch anywhere.</p></div>
+          <div class="feat">${iChat}<h3>Direct messages</h3><p>Chat with attachments, likes, and notifications.</p></div>
+          <div class="feat">${iDoc}<h3>Pips Docs</h3><p>Per-account text documents with version restore.</p></div>
+          <div class="feat">${iShield}<h3>Private by design</h3><p>Data lives in your own private repositories.</p></div>
+          <div class="feat">${dl}<h3>Device manager</h3><p>See every signed-in phone and revoke access.</p></div>
+        </div>
+      </section>
+
+      <footer class="install-foot">
+        <a href="/" rel="noopener">Open web app</a>
+        <a href="${releases}" rel="noopener">All releases</a>
+        <a href="/api/health" rel="noopener">Service status</a>
+      </footer>
+    </main>
+  </body>
+</html>
+`;
+}
+
+module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, chatPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage, appInstallPage };
