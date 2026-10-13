@@ -28,10 +28,28 @@ const { PipsDb } = require('./pipsdb');
 const { Devices } = require('./devices');
 const { Social } = require('./social');
 const appRelease = require('./app-release');
+const { Tunnels } = require('./tunnel');
+const { clientBundle } = require('./tunnel-package');
 const pages = require('./pages');
 const offlinePage = require('./offline-page');
 
 const MAX_BODY_BYTES = 16 * 1024;
+// Tunnel proxy bodies: uploads posted through /tun/<name> need far more than
+// the API default. The respond endpoint accepts base64 (4/3 overhead) of that.
+const TUNNEL_PROXY_BODY_LIMIT = 10 * 1024 * 1024;
+const TUNNEL_RESPOND_BODY_LIMIT = 25 * 1024 * 1024;
+// Headers the tunnel strips in both directions: hop-by-hop plus framing that
+// the two HTTP legs of the tunnel must re-derive themselves.
+const TUNNEL_STRIPPED_HEADERS = new Set([
+  'host', 'connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'te',
+  'trailer', 'content-length', 'accept-encoding', 'content-encoding',
+]);
+const TUNNEL_PROXY_PATTERN = '^/tun/([a-z0-9][a-z0-9_-]{0,31})(/.*)?$';
+
+function positiveInt(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
 // Room for the multipart headers and the upload id on top of the file itself.
 const UPLOAD_OVERHEAD_BYTES = 64 * 1024;
 const UPLOADS_PER_HOUR = 60;
@@ -1616,6 +1634,118 @@ async function apiChatCancel(ctx) {
   ok(ctx, 200, view);
 }
 
+// ---- Pips Tunnel: publish a localhost app under /tun/<name>.
+// The client (tunnel-client/, shipped as tunnel.tar.gz) registers a name,
+// long-polls for forwarded requests, calls http://localhost:<port>, and posts
+// responses back. register/respond/close are csrfExempt: the caller is a CLI
+// on another machine, not a browser session on this site.
+
+async function apiTunnelRegister(ctx) {
+  const body = await readJsonBody(ctx);
+  ok(ctx, 201, ctx.tunnel.register(body.name));
+}
+
+async function apiTunnelPoll(ctx) {
+  const name = String(ctx.url.searchParams.get('name') || '');
+  const client = String(ctx.url.searchParams.get('client') || '');
+  if (!name) throw new AppError(400, 'INVALID_NAME', 'Send ?name=<app-name>&client=<client-id>.');
+  const out = await ctx.tunnel.poll(name, client);
+  if (out.gone === 'offline') throw new AppError(410, 'TUNNEL_OFFLINE', 'This tunnel is not connected (server restarted?). Re-register.');
+  if (out.gone === 'replaced') throw new AppError(410, 'TUNNEL_REPLACED', 'This tunnel was taken over by another client.');
+  ok(ctx, 200, { request: out.request });
+}
+
+async function apiTunnelRespond(ctx) {
+  const body = parseJson(await readBody(ctx.req, TUNNEL_RESPOND_BODY_LIMIT));
+  if (!body.name || !body.id) throw new AppError(400, 'INVALID_BODY', 'Send { name, client, id, status, headers, body }.');
+  const out = ctx.tunnel.respond(String(body.name), String(body.client || ''), String(body.id), {
+    status: Number(body.status) || 200,
+    headers: body.headers && typeof body.headers === 'object' && !Array.isArray(body.headers) ? body.headers : {},
+    body: typeof body.body === 'string' ? body.body : '',
+  });
+  if (!out.delivered && out.reason === 'replaced') {
+    throw new AppError(410, 'TUNNEL_REPLACED', 'This tunnel was taken over by another client.');
+  }
+  ok(ctx, 200, { delivered: out.delivered });
+}
+
+async function apiTunnelClose(ctx) {
+  const body = await readJsonBody(ctx);
+  ok(ctx, 200, { closed: ctx.tunnel.close(String(body.name || '')) });
+}
+
+async function apiTunnelList(ctx) {
+  ok(ctx, 200, { tunnels: ctx.tunnel.list() });
+}
+
+// The downloadable client bundle, built fresh from tunnel-client/ on every
+// request so the download always matches the deployed source.
+async function apiTunnelClientTar(ctx) {
+  const bundle = clientBundle();
+  if (!bundle) throw new AppError(500, 'BUNDLE_MISSING', 'The tunnel client bundle is not available.');
+  const headers = {
+    'Content-Type': 'application/gzip',
+    'Content-Disposition': 'attachment; filename="tunnel.tar.gz"',
+    ETag: bundle.etag,
+    'Cache-Control': 'public, max-age=300',
+  };
+  if (ctx.req.headers['if-none-match'] === bundle.etag) return send(ctx.res, 304, headers, '');
+  return send(ctx.res, 200, headers, bundle.body);
+}
+
+async function pageTunnelHome(ctx) {
+  sendHtml(ctx.res, 200, pages.tunnelPage({ tunnels: ctx.tunnel.list() }), {
+    'Content-Security-Policy': INSTALL_PAGE_CSP,
+  });
+}
+
+// Raw buffer (readBody would decode utf8 and corrupt binary uploads).
+function readRawBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new AppError(413, 'PAYLOAD_TOO_LARGE', 'Tunnel request body is too large (10 MB cap).'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', () => reject(new AppError(400, 'BAD_REQUEST', 'The request could not be read.')));
+  });
+}
+
+// Reverse proxy: /tun/<name>/... → the connected client → its localhost app.
+async function apiTunnelProxy(ctx) {
+  const name = ctx.params.name;
+  const method = ctx.req.method === 'HEAD' ? 'GET' : ctx.req.method;
+  const raw = ['GET', 'HEAD'].includes(method) ? Buffer.alloc(0) : await readRawBody(ctx.req, TUNNEL_PROXY_BODY_LIMIT);
+  const headers = {};
+  for (const [k, v] of Object.entries(ctx.req.headers)) {
+    const lk = k.toLowerCase();
+    if (TUNNEL_STRIPPED_HEADERS.has(lk)) continue;
+    headers[lk] = Array.isArray(v) ? v.join(', ') : String(v);
+  }
+  const out = await ctx.tunnel.forward({
+    name,
+    method,
+    path: (ctx.params.rest || '/') + ctx.url.search,
+    headers,
+    body: raw.toString('base64'),
+  });
+  const resHeaders = {};
+  for (const [k, v] of Object.entries(out.headers || {})) {
+    const lk = String(k).toLowerCase();
+    if (TUNNEL_STRIPPED_HEADERS.has(lk)) continue;
+    if (lk === 'set-cookie') resHeaders['Set-Cookie'] = Array.isArray(v) ? v : [v];
+    else resHeaders[k] = v;
+  }
+  const status = Math.min(599, Math.max(100, Math.round(Number(out.status) || 200)));
+  send(ctx.res, status, resHeaders, Buffer.from(String(out.body || ''), 'base64'));
+}
+
 const FILE_ID = '([a-f0-9]{32})';
 const LINK_ID = '([a-f0-9]{32})';
 const SESSION = `(${SESSION_ID_RE.source.slice(1, -1)})`;
@@ -1748,6 +1878,19 @@ const ROUTES = [
   { method: 'POST', path: '/api/chat', handler: apiChatSend },
   { method: 'GET', pattern: new RegExp(`^/api/chat/jobs/${UUID}$`), handler: apiChatJob, keys: ['jobId'] },
   { method: 'DELETE', pattern: new RegExp(`^/api/chat/jobs/${UUID}$`), handler: apiChatCancel, keys: ['jobId'] },
+  // ---- Pips Tunnel: /tun/<name> publishes a localhost app (see tunnel-client/).
+  { method: 'GET', path: '/tun', handler: pageTunnelHome },
+  { method: 'GET', path: '/api/tunnel/list', handler: apiTunnelList },
+  { method: 'GET', path: '/api/tunnel/poll', handler: apiTunnelPoll },
+  { method: 'GET', path: '/api/tunnel/client.tar.gz', handler: apiTunnelClientTar },
+  { method: 'POST', path: '/api/tunnel/register', handler: apiTunnelRegister, csrfExempt: true },
+  { method: 'POST', path: '/api/tunnel/respond', handler: apiTunnelRespond, csrfExempt: true },
+  { method: 'POST', path: '/api/tunnel/close', handler: apiTunnelClose, csrfExempt: true },
+  { method: 'GET', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'] },
+  { method: 'POST', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'], csrfExempt: true },
+  { method: 'PUT', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'], csrfExempt: true },
+  { method: 'PATCH', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'], csrfExempt: true },
+  { method: 'DELETE', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'], csrfExempt: true },
 ];
 
 // Returns every route whose path matches, with any path parameters.
@@ -1793,9 +1936,9 @@ async function handleError(ctx, err) {
   return fail(ctx, 500, 'INTERNAL_ERROR', 'Something went wrong.');
 }
 
-async function dispatch(req, res, auth, corsOrigins, modelChat) {
+async function dispatch(req, res, auth, corsOrigins, modelChat, tunnels) {
   const url = new URL(req.url || '/', 'http://localhost');
-  const ctx = { req, res, url, auth, chat: modelChat, ip: clientIp(req, auth), params: {} };
+  const ctx = { req, res, url, auth, chat: modelChat, tunnel: tunnels, ip: clientIp(req, auth), params: {} };
   const method = req.method === 'HEAD' ? 'GET' : req.method;
 
   // /v1/* is the OpenAI-compatible surface: same CORS treatment as /api/*.
@@ -1848,8 +1991,14 @@ function createServer(options = {}) {
   const auth = buildAuth(env, options);
   const corsOrigins = parseCorsOrigins(env.CORS_ALLOWED_ORIGINS);
   const modelChat = buildModelChat(env, options);
+  const tunnels = new Tunnels({
+    now: options.now,
+    waitMs: positiveInt(env.TUNNEL_WAIT_MS, 30000),
+    pollWaitMs: positiveInt(env.TUNNEL_POLL_WAIT_MS, 20000),
+    ttlMs: positiveInt(env.TUNNEL_TTL_MS, 90000),
+  });
   const server = http.createServer((req, res) => {
-    dispatch(req, res, auth, corsOrigins, modelChat).catch((err) => {
+    dispatch(req, res, auth, corsOrigins, modelChat, tunnels).catch((err) => {
       console.error(`Unhandled error: ${err && err.name}`);
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end();
@@ -1860,6 +2009,8 @@ function createServer(options = {}) {
   // Tests use these to drive the chat with a stubbed upstream.
   server.modelChat = modelChat.chat;
   server.chatJobs = modelChat.jobs;
+  // Tests use this to seed tunnels without going through the HTTP API.
+  server.tunnels = tunnels;
   if (modelChat.chat.enabled) {
     console.log('Model chat: enabled. Starting the llama.cpp runtime in the background.');
     modelChat.chat.start();
