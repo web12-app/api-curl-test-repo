@@ -148,6 +148,33 @@ class GitHubReleases {
     return { id: data.id, assetCount: Array.isArray(data.assets) ? data.assets.length : 0 };
   }
 
+  // Full release record for a tag: body text plus every asset { id, name, size }.
+  // Null when no release exists on that tag.
+  async getReleaseByTag(tag) {
+    const res = await this.read(this.repoUrl(`/releases/tags/${encodeURIComponent(tag)}`));
+    if (res.status === 404) return null;
+    if (res.status !== 200) throw this.failure('Looking up the release', res);
+    const data = await res.json();
+    return {
+      id: data.id,
+      body: typeof data.body === 'string' ? data.body : '',
+      assets: (Array.isArray(data.assets) ? data.assets : []).map((a) => ({ id: a.id, name: a.name, size: a.size })),
+    };
+  }
+
+  // Replaces the release body (used to flip the model-cache metadata to published).
+  async updateRelease(releaseId, body) {
+    const res = await this.send('PATCH', this.repoUrl(`/releases/${releaseId}`), {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    });
+    if (res.status !== 200) {
+      await res.body?.cancel?.().catch(() => {});
+      throw this.failure('Updating the release', res);
+    }
+    await res.body?.cancel?.().catch(() => {});
+  }
+
   async deleteRelease(releaseId) {
     const res = await this.send('DELETE', this.repoUrl(`/releases/${releaseId}`));
     await res.body?.cancel?.().catch(() => {});
@@ -164,13 +191,13 @@ class GitHubReleases {
 
   // Uploads one file as a release asset, streamed from disk with a known length. Never overwrites: a new
   // release is used for each upload, and GitHub rejects a duplicate asset name anyway.
-  async uploadAsset(releaseId, name, filePath, size, contentType) {
+  async uploadAsset(releaseId, name, filePath, size, contentType, timeoutMs = UPLOAD_TIMEOUT_MS) {
     const url = `${this.uploadBase}/repos/${this.repo}/releases/${releaseId}/assets?name=${encodeURIComponent(name)}`;
     const res = await this.send('POST', url, {
       headers: { 'Content-Type': contentType, 'Content-Length': String(size) },
       body: fs.createReadStream(filePath),
       duplex: 'half',
-      timeoutMs: UPLOAD_TIMEOUT_MS,
+      timeoutMs,
     });
     if (res.status !== 201) {
       await res.body?.cancel?.().catch(() => {});
