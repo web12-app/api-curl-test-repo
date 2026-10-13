@@ -23,6 +23,7 @@ const { ModelChat } = require('./model-chat');
 const { ChatJobs } = require('./chat-jobs');
 const { ModelCache } = require('./model-cache');
 const { OpenAiCompat, sendV1Error, sendV1Json } = require('./openai-compat');
+const apiTokens = require('./api-tokens');
 const pages = require('./pages');
 const offlinePage = require('./offline-page');
 
@@ -133,22 +134,6 @@ function buildModelChat(env, overrides = {}) {
     fetchImpl: overrides.aiFetch,
   });
   return { chat, jobs, v1 };
-}
-
-// The release cache for chat models: every downloaded model is saved once as
-// release assets in the private data repository (tag model-cache/<id>), and
-// later starts restore it from there instead of re-downloading ~10 GiB from
-// the Hugging Face CDN. Active whenever the data-repo credentials exist;
-// MODEL_CACHE=off turns it off. Cache problems degrade to the normal download.
-function buildModelCache(env, overrides = {}) {
-  if (!env.GITHUB_TOKEN || !env.PRIVATE_DATA_REPO || env.MODEL_CACHE === 'off') return null;
-  const releases = overrides.modelCacheReleases || new GitHubReleases({
-    token: env.GITHUB_TOKEN,
-    repo: env.PRIVATE_DATA_REPO,
-    apiBase: overrides.githubApiBase,
-    uploadBase: overrides.githubUploadBase,
-  });
-  return new ModelCache({ releases, log: (line) => console.log(`[model-cache] ${line}`) });
 }
 
 // The release cache for chat models: every downloaded model is saved once as
@@ -305,7 +290,17 @@ function currentSessionOf(ctx) {
   return readSession(ctx.auth.config.sessionSecret, token, ctx.auth.now());
 }
 
+// API tokens (Authorization: Bearer sat_...) identify the same accounts as
+// session cookies, and their access is scoped to exactly their own user.
 async function currentUser(ctx) {
+  if (!ctx.auth.enabled) return null;
+  const bearer = apiTokens.fromHeader(ctx.req.headers.authorization);
+  if (bearer) {
+    ctx.authVia = 'api-token';
+    const resolved = await apiTokens.resolveToken(ctx.auth.storage, bearer);
+    if (!resolved) return null;
+    return loadUser(ctx.auth.storage, resolved.userId);
+  }
   const session = currentSessionOf(ctx);
   if (!session) return null;
   const record = await loadAccountRecord(ctx.auth.storage, session.uid);
@@ -324,6 +319,9 @@ async function requireUser(ctx) {
 // Mutating file routes must send this header. A cross-site page cannot add it without a CORS preflight,
 // which the allowlist refuses. This is the CSRF check for the JSON and upload routes.
 function requireCsrfHeader(ctx) {
+  // A Bearer API token is not a cookie: a cross-site page cannot attach one to a
+  // form post, so the browser-only CSRF header check does not apply to it.
+  if (apiTokens.isBearerHeader(ctx.req.headers.authorization)) return;
   if (ctx.req.headers['x-requested-with'] !== 'fetch') {
     throw new AppError(403, 'CSRF_HEADER_REQUIRED', 'This request must include the X-Requested-With: fetch header.');
   }
@@ -511,28 +509,73 @@ async function apiHealth(ctx) {
   sendJson(ctx.res, 200, { status: 'ok' });
 }
 
+// Every signup and login also mints a unique API token. It is shown once and
+// stored only as a SHA-256 hash; API clients send it as `Authorization: Bearer <token>`.
 async function apiSignup(ctx) {
   requireConfigured(ctx);
   const body = await readJsonBody(ctx);
   const user = await signup(ctx.auth, { username: body.username, password: body.password, ip: ctx.ip });
-  ok(ctx, 201, { user }, { 'Set-Cookie': await sessionHeader(ctx, user) });
+  const api_token = await apiTokens.issueToken(ctx.auth.storage, user.id, ctx.auth.now());
+  ok(ctx, 201, { user, api_token }, { 'Set-Cookie': await sessionHeader(ctx, user) });
 }
 
 async function apiLogin(ctx) {
   requireConfigured(ctx);
   const body = await readJsonBody(ctx);
   const user = await login(ctx.auth, { username: body.username, password: body.password, ip: ctx.ip });
-  ok(ctx, 200, { user }, { 'Set-Cookie': await sessionHeader(ctx, user) });
+  const api_token = await apiTokens.issueToken(ctx.auth.storage, user.id, ctx.auth.now());
+  ok(ctx, 200, { user, api_token }, { 'Set-Cookie': await sessionHeader(ctx, user) });
 }
 
 async function apiLogout(ctx) {
+  // A Bearer logout revokes exactly that API token. A cookie logout ends the
+  // browser sessions and leaves API tokens valid until revoked themselves.
+  let api_token_revoked = false;
+  const bearer = apiTokens.fromHeader(ctx.req.headers.authorization);
+  if (bearer && ctx.auth.enabled && apiTokens.isApiToken(bearer)) {
+    api_token_revoked = await apiTokens.revokeByRaw(ctx.auth.storage, bearer, ctx.auth.now());
+  }
   await endSession(ctx);
-  ok(ctx, 200, {}, { 'Set-Cookie': logoutHeader(ctx) });
+  ok(ctx, 200, { api_token_revoked }, { 'Set-Cookie': logoutHeader(ctx) });
 }
 
 async function apiMe(ctx) {
   requireConfigured(ctx);
   ok(ctx, 200, { user: await currentUser(ctx) }, {});
+}
+
+// ---- API token management (Bearer credentials for non-browser clients)
+
+async function apiListTokens(ctx) {
+  requireConfigured(ctx);
+  const user = await requireUser(ctx);
+  const tokens = await apiTokens.listTokens(ctx.auth.storage, user.id);
+  const bearer = apiTokens.fromHeader(ctx.req.headers.authorization);
+  let current = null;
+  if (bearer) {
+    const resolved = await apiTokens.resolveToken(ctx.auth.storage, bearer);
+    current = resolved ? resolved.tokenId : null;
+  }
+  ok(ctx, 200, { tokens, current });
+}
+
+async function apiCreateToken(ctx) {
+  requireConfigured(ctx);
+  const user = await requireUser(ctx);
+  const limitKey = `api-token:${user.id}`;
+  if (ctx.auth.limiter.count(limitKey, 60 * 60 * 1000) >= 20) {
+    throw new AppError(429, 'RATE_LIMITED', 'Too many API tokens created. Try again later.');
+  }
+  ctx.auth.limiter.record(limitKey);
+  ok(ctx, 201, { api_token: await apiTokens.issueToken(ctx.auth.storage, user.id, ctx.auth.now()) });
+}
+
+async function apiRevokeToken(ctx) {
+  requireConfigured(ctx);
+  const user = await requireUser(ctx);
+  const revoked = await apiTokens.revokeById(ctx.auth.storage, user.id, ctx.params.id, ctx.auth.now());
+  if (!revoked) throw new AppError(404, 'TOKEN_NOT_FOUND', 'No such API token.');
+  ok(ctx, 200, { revoked: true });
 }
 
 // ---- file storage API
@@ -1237,6 +1280,9 @@ const ROUTES = [
   { method: 'POST', path: '/api/login', handler: apiLogin },
   { method: 'POST', path: '/api/logout', handler: apiLogout },
   { method: 'GET', path: '/api/me', handler: apiMe },
+  { method: 'GET', path: '/api/tokens', handler: apiListTokens },
+  { method: 'POST', path: '/api/tokens', handler: apiCreateToken },
+  { method: 'DELETE', pattern: new RegExp('^/api/tokens/([a-f0-9]{12})$'), handler: apiRevokeToken, keys: ['id'] },
   { method: 'GET', path: '/api/files', handler: apiListFiles },
   { method: 'POST', path: '/api/files/upload', handler: apiUploadFile },
   { method: 'POST', path: '/api/uploads/init', handler: apiInitUpload },
@@ -1373,7 +1419,9 @@ async function dispatch(req, res, auth, corsOrigins, modelChat) {
   ctx.params = hit.params;
 
   // csrfExempt routes are protected by their own credential (the link token), so the same-origin check does not apply.
-  if (method !== 'GET' && !hit.route.csrfExempt && !sameOrigin(req, corsOrigins)) {
+  // A Bearer API token is a header credential: a cross-site form cannot send one, so it needs no origin check either.
+  const hasApiToken = apiTokens.isBearerHeader(req.headers.authorization);
+  if (method !== 'GET' && !hit.route.csrfExempt && !hasApiToken && !sameOrigin(req, corsOrigins)) {
     return fail(ctx, 403, 'CROSS_SITE_REFUSED', 'Cross-site requests are refused.');
   }
 

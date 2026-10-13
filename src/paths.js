@@ -5,7 +5,7 @@
 const USER_ID_RE = /^[a-f0-9]{32}$/;
 const USERNAME_RE = /^[a-z0-9_]{3,32}$/;
 // system/tube.json is the single Tube document (channels + published videos), shared by every user.
-const ALLOWED_PATH_RE = /^(users\/[a-f0-9]{32}\.json|system\/usernames\/[a-z0-9_]{3,32}\.json|system\/tube\.json|uploads\/[a-f0-9]{32}\/manifest\.json|shares\/[a-f0-9]{64}\.json|upload-links\/[a-f0-9]{64}\.json)$/;
+const ALLOWED_PATH_RE = /^(users\/[a-f0-9]{32}\.json|system\/usernames\/[a-z0-9_]{3,32}\.json|system\/tube\.json|uploads\/[a-f0-9]{32}\/manifest\.json|shares\/[a-f0-9]{64}\.json|upload-links\/[a-f0-9]{64}\.json|tokens\/[a-f0-9]{32}\.json)$/;
 const SHARE_HASH_RE = /^[a-f0-9]{64}$/;
 
 function userPath(userId) {
@@ -36,6 +36,12 @@ function uploadLinkPath(tokenHash) {
   return `upload-links/${tokenHash}.json`;
 }
 
+// One API-token index per user. It holds only SHA-256 hashes of that user's Bearer tokens.
+function tokensPath(userId) {
+  if (!USER_ID_RE.test(userId)) throw new Error('invalid user id');
+  return `tokens/${userId}.json`;
+}
+
 // The single Tube document: every channel and every published video, in one JSON file.
 function tubePath() {
   return 'system/tube.json';
@@ -46,4 +52,4 @@ function assertAllowedPath(path) {
   return path;
 }
 
-module.exports = { USERNAME_RE, userPath, usernamePath, manifestPath, sharePath, uploadLinkPath, tubePath, assertAllowedPath };
+module.exports = { USERNAME_RE, userPath, usernamePath, manifestPath, sharePath, uploadLinkPath, tokensPath, tubePath, assertAllowedPath };
