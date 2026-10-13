@@ -23,6 +23,11 @@
 // Provisioning reuses the audited shell scripts from scripts/model/:
 //   validate-model.sh  (live HF check: file, size, sha256, architecture)
 //   download-model.sh  (resumable, checksum-verified, weights never enter git)
+//
+// Release cache: when a cache client is wired (server.js builds it from the
+// data-repo credentials), every downloaded model is saved once as release
+// assets in the private data repo, and later starts restore it from there -
+// no HF download at all. See src/model-cache.js.
 
 const fs = require('node:fs');
 const http = require('node:http');
@@ -163,6 +168,8 @@ class ModelChat {
       autoProvision: env.CHAT_AUTOPROVISION === '1' || env.CHAT_AUTOPROVISION === 'true',
       upstreamBase: options.upstreamBase || null,
       overrides: options.overrides || {},
+      // Optional ModelCache (release assets in the data repo). Null disables it.
+      cache: options.cache || null,
     };
     this.state = 'disabled';
     this.detail = 'Model chat is not configured (set LLAMA_SERVER_BIN and MODEL_GGUF_PATH).';
@@ -227,6 +234,10 @@ class ModelChat {
       pid: this.child ? this.child.pid : null,
       uptime_s: this.child && this.startedAt ? Math.floor((Date.now() - this.startedAt) / 1000) : null,
       log_tail: this.logTail.slice(-12),
+      cache: {
+        enabled: Boolean(this.opt.cache),
+        publishing: this.opt.cache ? this.opt.cache.publishingIds() : [],
+      },
     };
     return { ...base, ...(this.opt.overrides.status || {}) };
   }
@@ -589,6 +600,26 @@ class ModelChat {
     const destDir = path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'model-cache');
     fs.mkdirSync(destDir, { recursive: true });
 
+    // Fast path: the release cache. A verified copy of this model saved as
+    // release assets in the data repo skips the HF download entirely; the
+    // reassembled file is sha256-checked against the registry value, so the
+    // cache can never serve different bytes than the source.
+    if (this.opt.cache && entry.sha256) {
+      try {
+        this.detail = `Checking the release cache for ${entry.label}.`;
+        const hit = await this.opt.cache.fetch(entry.id, { destDir, sha256: entry.sha256, bytes: entry.sizeBytes });
+        if (hit) {
+          this._log(`[cache] loaded ${path.basename(hit.path)} from the release cache`);
+          this.detail = `${entry.label} restored from the release cache (no download needed).`;
+          this.modelInfo = this._infoFrom(null, entry, hit.path, hit.bytes, false);
+          return { path: hit.path, bytes: hit.bytes };
+        }
+        this._log(`[cache] no cached copy for ${entry.id}; using the HF source`);
+      } catch (err) {
+        this._log(`[cache] unusable (${err.message}); falling back to the HF download`);
+      }
+    }
+
     // Live validation first: the repository may have changed or gone away.
     let meta = null;
     try {
@@ -659,8 +690,30 @@ class ModelChat {
       this._fail('MODEL_FILE_MISSING', 'the model download finished without producing a file');
       return null;
     }
+    this._maybePublishCache(entry, finalPath, sha, bytes, meta);
     this.modelInfo = this._infoFrom(meta, entry, finalPath, bytes, Boolean(meta));
     return { path: finalPath, bytes };
+  }
+
+  // Saves the freshly downloaded model into the release cache in the background
+  // so future starts (fresh runners) restore it fast instead of re-downloading
+  // from HF. Never blocks or fails the chat: publish errors are logged only.
+  _maybePublishCache(entry, filePath, sha, bytes, meta) {
+    const cache = this.opt.cache;
+    if (!cache || !sha || !bytes || !entry.sha256) return;
+    const ggufFile = (meta && meta.gguf_file) || path.basename(filePath);
+    cache
+      .publish(entry.id, {
+        filePath,
+        sha256: sha,
+        bytes,
+        hfRepo: (meta && meta.hf_repo) || entry.repo,
+        ggufFile,
+      })
+      .then((saved) => {
+        if (saved) this._log(`[cache] ${entry.id} saved into the release cache`);
+      })
+      .catch((err) => this._log(`[cache] publish failed: ${err && err.message ? err.message : err}`));
   }
 
   _infoFrom(meta, entry, localPath, bytes, validatedLive) {

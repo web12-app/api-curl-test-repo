@@ -126,6 +126,7 @@ variable:
 | `MODEL_MAX_TOKENS` | per-request cap | `256` |
 | `MODEL_TIMEOUT_MS` | generation timeout | `420000` |
 | `MODEL_THINKING` | `1` keeps the Qwen3 `<think>` reasoning block before each answer | off (speed) |
+| `MODEL_CACHE` | `off` disables the release cache for model weights | on when the data repo is configured |
 
 Thinking is disabled by default: on the runner's CPU the reasoning block costs
 about 80% of the generated tokens, so a simple "Hi" took ~35 s with thinking
@@ -133,6 +134,33 @@ and drops to single-digit seconds without it. The chat template is told via
 `enable_thinking: false` (llama-server also gets `--jinja --reasoning-budget 0`
 when its `--help` advertises them, probed per build). If a build rejects the
 template kwarg, generation degrades gracefully to one retry without it.
+
+### Release cache: download once, load fast forever
+
+Every fresh CI runner used to re-download the GGUF from the Hugging Face CDN
+(~10.7 GiB for the 27B model, several minutes at CDN speed). The release cache
+removes that cost:
+
+1. After a model is downloaded and checksum-verified, it is saved **once** as
+   release assets in the private data repository (`src/model-cache.js`, in the
+   background - the chat is never delayed by the upload).
+2. The release is tagged `model-cache/<model-id>`; the GGUF is split into
+   parts of at most 1.9 GiB (GitHub's 2 GiB asset ceiling), and the release
+   body carries the metadata as JSON (`gguf_file`, `bytes`, `sha256`, part
+   list, `status: publishing|published`).
+3. On every later start the provisioning first checks the cache: a
+   `published`, size-consistent entry is restored from the release (parts are
+   appended as they arrive, so at most one part is ever staged on disk), and
+   the reassembled file is **sha256-verified against the registry value** -
+   a cache can never serve different bytes than the HF source.
+4. Integrity or transfer problems degrade honestly: a sha256 mismatch deletes
+   the cache entry and the start falls back to the normal HF download; a
+   crashed publish (`status: publishing`) is ignored by lookups and replaced
+   by the next publish; publishing failures never affect the running chat.
+
+The cache is active whenever the data-repo credentials exist
+(`GITHUB_TOKEN` + `PRIVATE_DATA_REPO`); `MODEL_CACHE=off` turns it off.
+`GET /api/chat/status` reports it under `cache` (`enabled`, `publishing`).
 
 ### Chat API
 

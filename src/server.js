@@ -21,6 +21,7 @@ const { TubeService } = require('./tube');
 const { USERNAME_RE } = require('./paths');
 const { ModelChat } = require('./model-chat');
 const { ChatJobs } = require('./chat-jobs');
+const { ModelCache } = require('./model-cache');
 const pages = require('./pages');
 const offlinePage = require('./offline-page');
 
@@ -113,9 +114,26 @@ function buildFiles(env, authConfig, storage, now, overrides) {
 // asks the server to fetch both). Every failure lands in chat.status(); the
 // rest of the site is never affected by the model runtime.
 function buildModelChat(env, overrides = {}) {
-  const chat = new ModelChat(env, { upstreamBase: overrides.upstreamBase });
+  const cache = overrides.modelCache !== undefined ? overrides.modelCache : buildModelCache(env, overrides);
+  const chat = new ModelChat(env, { upstreamBase: overrides.upstreamBase, cache });
   const jobs = new ChatJobs(chat, { now: overrides.now });
   return { chat, jobs };
+}
+
+// The release cache for chat models: every downloaded model is saved once as
+// release assets in the private data repository (tag model-cache/<id>), and
+// later starts restore it from there instead of re-downloading ~10 GiB from
+// the Hugging Face CDN. Active whenever the data-repo credentials exist;
+// MODEL_CACHE=off turns it off. Cache problems degrade to the normal download.
+function buildModelCache(env, overrides = {}) {
+  if (!env.GITHUB_TOKEN || !env.PRIVATE_DATA_REPO || env.MODEL_CACHE === 'off') return null;
+  const releases = overrides.modelCacheReleases || new GitHubReleases({
+    token: env.GITHUB_TOKEN,
+    repo: env.PRIVATE_DATA_REPO,
+    apiBase: overrides.githubApiBase,
+    uploadBase: overrides.githubUploadBase,
+  });
+  return new ModelCache({ releases, log: (line) => console.log(`[model-cache] ${line}`) });
 }
 
 // Headers on every response. Downloads add their own on top.

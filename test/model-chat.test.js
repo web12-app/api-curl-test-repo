@@ -431,3 +431,180 @@ describe('_serverFlags', () => {
     assert.deepEqual(await chat._serverFlags(bin), []);
   });
 });
+
+describe('release cache in provisioning', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const nodePath = require('node:path');
+  const crypto = require('node:crypto');
+
+  const MIB = 1024 * 1024;
+
+  // A small fake registry entry with recorded verified facts, plus a matching
+  // HF-style validation payload for the download fallback tests.
+  function fakeEntry() {
+    const bytes = 3 * MIB;
+    const data = crypto.randomBytes(bytes);
+    return {
+      entry: {
+        id: 'cache-test',
+        label: 'Cache Test Model',
+        repo: 'org/cache-test-GGUF',
+        quant: 'Q2_K',
+        path: 'Q2_K/cache-test-f16.gguf.Q2_K.gguf',
+        sizeBytes: bytes,
+        sha256: crypto.createHash('sha256').update(data).digest('hex'),
+        architecture: 'llama',
+        license: 'test-license',
+      },
+      meta: {
+        hf_repo: 'org/cache-test-GGUF',
+        gguf_file: 'cache-test-f16.gguf.Q2_K.gguf',
+        gguf_size_bytes: String(bytes),
+        quant: 'Q2_K',
+      },
+      data,
+    };
+  }
+
+  function fakeCache() {
+    const calls = { fetch: [], publish: [] };
+    const state = { fetchResult: null, fetchError: null, publishResult: true, publishError: null };
+    const cache = {
+      calls,
+      state,
+      async fetch(modelId, opts) {
+        calls.fetch.push({ modelId, opts });
+        if (state.fetchError) throw state.fetchError;
+        return state.fetchResult;
+      },
+      async publish(modelId, opts) {
+        calls.publish.push({ modelId, opts });
+        if (state.publishError) throw state.publishError;
+        return state.publishResult;
+      },
+      publishingIds: () => [],
+    };
+    return cache;
+  }
+
+  function provisioningChat(cache) {
+    const chat = new ModelChat({ CHAT_AUTOPROVISION: '1' }, { cache });
+    return chat;
+  }
+
+  test('a cache hit serves the model without contacting HF at all', async () => {
+    const { entry, meta } = fakeEntry();
+    const cache = fakeCache();
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'mchat-cache-'));
+    const cachedFile = nodePath.join(dir, meta.gguf_file);
+    fs.writeFileSync(cachedFile, Buffer.alloc(1));
+    cache.state.fetchResult = { path: cachedFile, bytes: entry.sizeBytes };
+
+    const chat = provisioningChat(cache);
+    chat._runScript = () => { throw new Error('no script may run on a cache hit'); };
+    const out = await chat._provisionModel(entry);
+    assert.equal(out.path, cachedFile);
+    assert.equal(out.bytes, entry.sizeBytes);
+    assert.deepEqual(cache.calls.fetch.map((c) => c.modelId), ['cache-test']);
+    assert.equal(cache.calls.fetch[0].opts.sha256, entry.sha256);
+    assert.equal(chat.modelInfo.sha256, entry.sha256);
+    assert.equal(chat.modelInfo.validated_live, false);
+    assert.equal(chat.state, 'provisioning-model');
+    assert.ok(logJoined(chat).includes('[cache] loaded cache-test-f16.gguf.Q2_K.gguf from the release cache'));
+  });
+
+  test('a cache miss falls back to the HF path and publishes the download in the background', async () => {
+    const { entry, meta } = fakeEntry();
+    const cache = fakeCache();
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'mchat-cache-'));
+    process.env.RUNNER_TEMP = dir;
+    const chat = provisioningChat(cache);
+    chat._runScript = async (script, args, env, phase) => {
+      if (phase === 'validate') {
+        return [
+          `download_url=https://huggingface.co/${entry.repo}/resolve/main/${entry.path}?download=true`,
+          `gguf_sha256=${entry.sha256}`,
+          `gguf_size_bytes=${entry.sizeBytes}`,
+          `gguf_file=${meta.gguf_file}`,
+          `hf_repo=${entry.repo}`,
+          `quant=${entry.quant}`,
+        ].join('\n');
+      }
+      if (phase === 'download') {
+        const target = nodePath.join(env.DEST_DIR, nodePath.basename(env.DOWNLOAD_URL.split("?")[0]));
+        fs.writeFileSync(target, Buffer.alloc(Number(env.EXPECTED_SIZE)));
+        return `model_path=${target}`;
+      }
+      throw new Error(`unexpected phase ${phase}`);
+    };
+
+    const out = await chat._provisionModel(entry);
+    assert.equal(nodePath.basename(out.path), meta.gguf_file);
+    assert.deepEqual(cache.calls.fetch.map((c) => c.modelId), ['cache-test']);
+    // The publish carries the verified facts and the exact downloaded file.
+    assert.equal(cache.calls.publish.length, 1);
+    assert.equal(cache.calls.publish[0].modelId, 'cache-test');
+    assert.equal(cache.calls.publish[0].opts.sha256, entry.sha256);
+    assert.equal(cache.calls.publish[0].opts.bytes, entry.sizeBytes);
+    assert.equal(cache.calls.publish[0].opts.ggufFile, meta.gguf_file);
+    assert.equal(cache.calls.publish[0].opts.filePath, out.path);
+  });
+
+  test('a broken cache degrades to the normal download without failing the chat', async () => {
+    const { entry, meta } = fakeEntry();
+    const cache = fakeCache();
+    cache.state.fetchError = new Error('the data repo is unreachable');
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'mchat-cache-'));
+    process.env.RUNNER_TEMP = dir;
+    const chat = provisioningChat(cache);
+    chat._runScript = async (script, args, env, phase) => {
+      if (phase === 'validate') return `download_url=https://huggingface.co/${entry.repo}/resolve/main/${entry.path}\ngguf_sha256=${entry.sha256}\ngguf_size_bytes=${entry.sizeBytes}\ngguf_file=${meta.gguf_file}`;
+      if (phase === 'download') {
+        const target = nodePath.join(env.DEST_DIR, nodePath.basename(env.DOWNLOAD_URL.split("?")[0]));
+        fs.writeFileSync(target, Buffer.alloc(Number(env.EXPECTED_SIZE)));
+        return `model_path=${target}`;
+      }
+      throw new Error(`unexpected phase ${phase}`);
+    };
+
+    const out = await chat._provisionModel(entry);
+    assert.ok(out && out.path, 'the download still produced the model');
+    assert.ok(logJoined(chat).includes('[cache] unusable (the data repo is unreachable)'));
+  });
+
+  test('a publish failure never fails provisioning', async () => {
+    const { entry, meta } = fakeEntry();
+    const cache = fakeCache();
+    cache.state.publishError = new Error('upload exploded');
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'mchat-cache-'));
+    process.env.RUNNER_TEMP = dir;
+    const chat = provisioningChat(cache);
+    chat._runScript = async (script, args, env, phase) => {
+      if (phase === 'validate') return `download_url=https://huggingface.co/${entry.repo}/resolve/main/${entry.path}\ngguf_sha256=${entry.sha256}\ngguf_size_bytes=${entry.sizeBytes}\ngguf_file=${meta.gguf_file}`;
+      if (phase === 'download') {
+        const target = nodePath.join(env.DEST_DIR, nodePath.basename(env.DOWNLOAD_URL.split("?")[0]));
+        fs.writeFileSync(target, Buffer.alloc(Number(env.EXPECTED_SIZE)));
+        return `model_path=${target}`;
+      }
+      throw new Error(`unexpected phase ${phase}`);
+    };
+
+    const out = await chat._provisionModel(entry);
+    assert.ok(out && out.path);
+    assert.equal(chat.state, 'provisioning-model'); // no _fail happened
+    await new Promise((r) => setImmediate(r));
+    assert.ok(logJoined(chat).includes('[cache] publish failed: upload exploded'));
+  });
+
+  test('status() exposes the cache block', () => {
+    const withCache = new ModelChat({}, { cache: fakeCache() });
+    assert.deepEqual(withCache.status().cache, { enabled: true, publishing: [] });
+    const withoutCache = new ModelChat({});
+    assert.deepEqual(withoutCache.status().cache, { enabled: false, publishing: [] });
+  });
+
+  function logJoined(chat) {
+    return chat.logTail.join('\n');
+  }
+});
