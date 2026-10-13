@@ -151,6 +151,22 @@ function buildModelCache(env, overrides = {}) {
   return new ModelCache({ releases, log: (line) => console.log(`[model-cache] ${line}`) });
 }
 
+// The release cache for chat models: every downloaded model is saved once as
+// release assets in the private data repository (tag model-cache/<id>), and
+// later starts restore it from there instead of re-downloading ~10 GiB from
+// the Hugging Face CDN. Active whenever the data-repo credentials exist;
+// MODEL_CACHE=off turns it off. Cache problems degrade to the normal download.
+function buildModelCache(env, overrides = {}) {
+  if (!env.GITHUB_TOKEN || !env.PRIVATE_DATA_REPO || env.MODEL_CACHE === 'off') return null;
+  const releases = overrides.modelCacheReleases || new GitHubReleases({
+    token: env.GITHUB_TOKEN,
+    repo: env.PRIVATE_DATA_REPO,
+    apiBase: overrides.githubApiBase,
+    uploadBase: overrides.githubUploadBase,
+  });
+  return new ModelCache({ releases, log: (line) => console.log(`[model-cache] ${line}`) });
+}
+
 // Headers on every response. Downloads add their own on top.
 function securityHeaders() {
   return {
