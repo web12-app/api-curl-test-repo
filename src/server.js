@@ -1056,6 +1056,20 @@ function publicChatStatus(ctx) {
     context: st.context,
     max_tokens: st.max_tokens,
     timeout_ms: st.timeout_ms,
+    loaded_model: st.loaded_model || null,
+    default_model: st.default_model || null,
+    // The verified model registry the chat can load, one at a time.
+    models: Array.isArray(st.models)
+      ? st.models.map((m) => ({
+          id: m.id,
+          label: m.label,
+          repo: m.repo,
+          quant: m.quant,
+          bytes: m.bytes,
+          arch: m.arch,
+          license: m.license,
+        }))
+      : [],
     model: st.model
       ? {
           repo: st.model.repo,

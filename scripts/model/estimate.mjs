@@ -27,6 +27,23 @@ export const MODEL = {
   license: 'apache-2.0',
 };
 
+// Geometry for standard Qwen3 dense models (Qwen3-8B family), from the
+// published base-model config.json: 36 layers, all full attention (no linear
+// layers on this architecture), 32 query heads / 8 kv heads, head_dim 128.
+export const QWEN3_8B_GEOMETRY = {
+  layers: 36,
+  fullAttentionInterval: 1,
+  kvHeads: 8,
+  headDim: 128,
+  linearKeyHeads: 0,
+  linearValueHeads: 0,
+  linearHeadDim: 0,
+  kvBytesPerElement: 2,      // K/V cache stored f16
+  ssmBytesPerElement: 4,     // unused on this architecture (no recurrent state)
+  computeBufferBytes: 402653184,  // 384 MiB compute/scratch buffers for an 8B
+  overheadBytes: 805306368,       // 768 MiB OS + runtime overhead beyond buffers
+};
+
 // Geometry used for memory estimation. Values come from the verified base-model
 // config.json (text_config.*) — measured inputs, not guesses.
 export const GEOMETRY = {
@@ -42,6 +59,47 @@ export const GEOMETRY = {
   computeBufferBytes: 805306368,  // 768 MiB compute/scratch buffers for a 27B
   overheadBytes: 805306368,       // 768 MiB OS + runtime overhead beyond buffers
 };
+
+// The models the site chat can load. Every entry is a VERIFIED source (HF API
+// checked, sha256 from the HF tree API, GGUF header read via range request):
+//  - qwen3-27b: verified 2026-10-12 (see MODEL above)
+//  - huihui-qwen3-8b: verified 2026-10-13
+//    repo DevQuasar/huihui-ai.Qwen3-8B-abliterated-GGUF (public, not gated)
+//    file huihui-ai.Qwen3-8B-abliterated.Q2_K.gguf, 3,281,728,768 bytes,
+//    sha256 from HF lfs.oid, general.architecture = qwen3, Apache-2.0.
+//    Flat repo layout (no Q2_K/ subdirectory).
+export const MODELS = {
+  'qwen3-27b': {
+    id: 'qwen3-27b',
+    label: 'Qwen3.8 27B (DevQuasar)',
+    ...MODEL,
+    geometry: GEOMETRY,
+  },
+  'huihui-qwen3-8b': {
+    id: 'huihui-qwen3-8b',
+    label: 'Qwen3 8B Abliterated (huihui-ai)',
+    repo: 'DevQuasar/huihui-ai.Qwen3-8B-abliterated-GGUF',
+    quant: 'Q2_K',
+    path: 'huihui-ai.Qwen3-8B-abliterated.Q2_K.gguf',
+    sizeBytes: 3281728768,
+    sha256: 'e2c01eff34523c23284ca4f585bf53a3161b4d150c6bed0d71290126ae5e3396',
+    architecture: 'qwen3',
+    license: 'apache-2.0',
+    geometry: QWEN3_8B_GEOMETRY,
+  },
+};
+
+// The model loaded when no explicit selection exists (the original chat model).
+export const DEFAULT_MODEL_ID = 'qwen3-27b';
+
+export function modelById(id) {
+  return MODELS[id] || null;
+}
+
+// Memory requirement for a specific registry model (its own geometry).
+export function requiredBytesForModel(model, ctx, modelBytes) {
+  return requiredBytes(ctx, modelBytes === undefined ? model.sizeBytes : modelBytes, model.geometry);
+}
 
 // Accepted input ranges for the inference interface.
 export const LIMITS = {
@@ -108,6 +166,7 @@ export function requiredBytes(ctx, modelBytes = MODEL.sizeBytes, g = GEOMETRY) {
   return estimateBreakdown(ctx, modelBytes, g).required;
 }
 
+
 /** Parse MemAvailable (bytes) from the text of /proc/meminfo. */
 export function memAvailableBytes(meminfoText) {
   const m = /^MemAvailable:\s+(\d+)\s*kB$/m.exec(String(meminfoText));
@@ -154,8 +213,14 @@ async function cli(argv) {
   };
   if (cmd === 'required') {
     const ctx = Number(flag('--ctx') || 1024);
-    const modelBytes = flag('--model-bytes') ? Number(flag('--model-bytes')) : MODEL.sizeBytes;
-    process.stdout.write(`${JSON.stringify(estimateBreakdown(ctx, modelBytes))}\n`);
+    const model = flag('--model') ? modelById(flag('--model')) : null;
+    if (flag('--model') && !model) {
+      process.stderr.write(`FAIL: unknown model '${flag('--model')}' (known: ${Object.keys(MODELS).join(', ')})\n`);
+      return 2;
+    }
+    const geom = model ? model.geometry : GEOMETRY;
+    const modelBytes = flag('--model-bytes') ? Number(flag('--model-bytes')) : model ? model.sizeBytes : MODEL.sizeBytes;
+    process.stdout.write(`${JSON.stringify(estimateBreakdown(ctx, modelBytes, geom))}\n`);
     return 0;
   }
   if (cmd === 'available') {

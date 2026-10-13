@@ -2,7 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  MODEL, GEOMETRY, LIMITS,
+  MODEL, GEOMETRY, LIMITS, MODELS, DEFAULT_MODEL_ID,
+  modelById, requiredBytesForModel,
   parseBytes, fmtBytes, fullAttentionLayerCount,
   kvCacheBytes, linearStateBytes, estimateBreakdown,
   memAvailableBytes, validateInputs,
@@ -16,6 +17,39 @@ test('verified model constants are the checked facts', () => {
   assert.match(MODEL.sha256, /^[0-9a-f]{64}$/);
   assert.equal(MODEL.architecture, 'qwen35');
   assert.equal(MODEL.license, 'apache-2.0');
+});
+
+test('model registry holds the two verified chat models', () => {
+  assert.deepEqual(Object.keys(MODELS), ['qwen3-27b', 'huihui-qwen3-8b']);
+  assert.equal(DEFAULT_MODEL_ID, 'qwen3-27b');
+  assert.equal(modelById('qwen3-27b').repo, 'DevQuasar/Qwen.Qwen3.8-27B-GGUF');
+  assert.equal(modelById('nope'), null);
+
+  const huihui = modelById('huihui-qwen3-8b');
+  // Facts verified live against the HF API on 2026-10-13.
+  assert.equal(huihui.repo, 'DevQuasar/huihui-ai.Qwen3-8B-abliterated-GGUF');
+  assert.equal(huihui.quant, 'Q2_K');
+  assert.equal(huihui.path, 'huihui-ai.Qwen3-8B-abliterated.Q2_K.gguf');
+  assert.equal(huihui.sizeBytes, 3281728768);
+  assert.equal(huihui.sha256, 'e2c01eff34523c23284ca4f585bf53a3161b4d150c6bed0d71290126ae5e3396');
+  assert.equal(huihui.architecture, 'qwen3');
+  assert.equal(huihui.license, 'apache-2.0');
+});
+
+test('the 8B model uses dense qwen3 geometry and needs far less RAM', () => {
+  const g = modelById('huihui-qwen3-8b').geometry;
+  assert.equal(g.layers, 36);
+  assert.equal(fullAttentionLayerCount(g), 36); // every layer, no linear attention
+  assert.equal(linearStateBytes(g), 0);          // no recurrent state on qwen3-8b
+  // KV at 1024: 36 layers * 8 kv heads * 128 head_dim * 2 (K+V) * 2 bytes
+  assert.equal(kvCacheBytes(1024, g), 36 * 1024 * 8 * 128 * 2 * 2);
+
+  const req8 = requiredBytesForModel(modelById('huihui-qwen3-8b'), 1024);
+  const req27 = requiredBytesForModel(modelById('qwen3-27b'), 1024);
+  assert.ok(req8 > modelById('huihui-qwen3-8b').sizeBytes, '8B estimate must exceed its file size');
+  assert.ok(req8 < req27 / 2, `8B (${req8}) should need under half the 27B (${req27}) RAM`);
+  // ~4-6 GiB at ctx 1024, matching the live validate-model.sh estimate.
+  assert.ok(req8 > 4 * 1024 ** 3 && req8 < 6 * 1024 ** 3, `unexpected 8B estimate ${req8}`);
 });
 
 test('parseBytes handles raw numbers, decimal and binary units', () => {

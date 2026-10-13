@@ -326,3 +326,73 @@ test('an unconfigured server reports the chat as disabled and refuses generation
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+// ---- Multi-model selection: the registry, per-job model choice, and the
+// 400 path for unknown ids. The stub runtime serves whatever is asked, so
+// these verify the site plumbing (selection lands on the job and status).
+
+test('chat status exposes the verified model registry and the loaded model', async () => {
+  const app = await startApp();
+  try {
+    const user = await signup(app, 'modelena');
+    const res = await fetch(`${app.base}/api/chat/status`, authed(app, user.cookie));
+    assert.equal(res.status, 200);
+    const body = (await res.json()).data;
+    assert.deepEqual(
+      body.models.map((m) => m.id),
+      ['qwen3-27b', 'huihui-qwen3-8b'],
+      'both the old and the new model are selectable',
+    );
+    const huihui = body.models.find((m) => m.id === 'huihui-qwen3-8b');
+    assert.equal(huihui.repo, 'DevQuasar/huihui-ai.Qwen3-8B-abliterated-GGUF');
+    assert.equal(huihui.quant, 'Q2_K');
+    assert.equal(huihui.bytes, 3281728768);
+    assert.equal(huihui.arch, 'qwen3');
+    assert.equal(body.default_model, 'qwen3-27b');
+    assert.equal(body.loaded_model, 'qwen3-27b');
+  } finally {
+    await app.close();
+  }
+});
+
+test('a chat POST with the new model completes and tags the result with it', async () => {
+  const app = await startApp();
+  try {
+    const user = await signup(app, 'modeler');
+    const res = await fetch(`${app.base}/api/chat`, authed(app, user.cookie, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'What is the capital of France?', model: 'huihui-qwen3-8b' }),
+    }));
+    assert.equal(res.status, 202);
+    const { id } = (await res.json()).data;
+    const view = await pollUntil(app, user.cookie, id, ['done']);
+    assert.equal(view.model, 'huihui-qwen3-8b');
+    assert.equal(view.result.model, 'huihui-qwen3-8b');
+    assert.equal(view.result.text, 'Paris');
+
+    // The selection stuck: status now reports the 8B model as loaded.
+    const status = await fetch(`${app.base}/api/chat/status`, authed(app, user.cookie));
+    assert.equal((await status.json()).data.loaded_model, 'huihui-qwen3-8b');
+  } finally {
+    await app.close();
+  }
+});
+
+test('an unknown model id is a 400 BAD_MODEL that names the valid options', async () => {
+  const app = await startApp();
+  try {
+    const user = await signup(app, 'modelless');
+    const res = await fetch(`${app.base}/api/chat`, authed(app, user.cookie, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', model: 'gpt-5-ultra' }),
+    }));
+    assert.equal(res.status, 400);
+    const err = (await res.json()).error;
+    assert.equal(err.code, 'BAD_MODEL');
+    assert.ok(err.message.includes('qwen3-27b') && err.message.includes('huihui-qwen3-8b'), 'lists the available models');
+  } finally {
+    await app.close();
+  }
+});

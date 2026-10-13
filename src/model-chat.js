@@ -155,6 +155,8 @@ class ModelChat {
       // before the answer. The site chat disables that for speed; set
       // MODEL_THINKING=1 to keep the reasoning (slower, deeper replies).
       thinking: env.MODEL_THINKING === '1',
+      // Optional default model id from the registry (CHAT_DEFAULT_MODEL).
+      defaultModel: env.CHAT_DEFAULT_MODEL || '',
       binPath: env.LLAMA_SERVER_BIN || '',
       modelPath: env.MODEL_GGUF_PATH || '',
       repoExplicit: Boolean(env.HF_REPO),
@@ -173,6 +175,27 @@ class ModelChat {
     this.failedAt = 0;
     this._flagsProbe = null;
     this.abortControllers = new Set();
+
+    // Multi-model state. The registry (estimate.mjs MODELS) lists every
+    // verified model the chat may load; one llama-server holds ONE model at a
+    // time, so selecting another model hot-swaps the runtime.
+    this.loadedModel = null;      // registry id currently loaded (or being loaded)
+    this.pendingModelId = null;   // registry id the next (re)start should load
+    this._switchChain = Promise.resolve(); // serializes hot-swaps
+    this.models = [];             // public list for the UI, filled below
+    this.defaultModelId = null;
+    loadEstimate().then((est) => {
+      this.models = Object.values(est.MODELS).map((m) => ({
+        id: m.id,
+        label: m.label,
+        repo: m.repo,
+        quant: m.quant,
+        bytes: m.sizeBytes,
+        arch: m.architecture,
+        license: m.license,
+      }));
+      this.defaultModelId = this._defaultModelId(est);
+    }).catch(() => { /* registry stays empty; status() still serves */ });
 
     // Real model facts recorded by the verified validation run (estimate.mjs);
     // used for reporting and as the checksum source when HF is unreachable.
@@ -198,6 +221,9 @@ class ModelChat {
       max_tokens: this.opt.maxTokens,
       timeout_ms: this.opt.timeoutMs,
       model: this.modelInfo,
+      models: this.models,
+      loaded_model: this.loadedModel,
+      default_model: this.defaultModelId,
       pid: this.child ? this.child.pid : null,
       uptime_s: this.child && this.startedAt ? Math.floor((Date.now() - this.startedAt) / 1000) : null,
       log_tail: this.logTail.slice(-12),
@@ -209,7 +235,7 @@ class ModelChat {
   // status() so the rest of the site is unaffected.
   start() {
     if (!this.enabled || this.startPromise) return this.startPromise || Promise.resolve();
-    this.startPromise = this._run()
+    this.startPromise = this._run(this.pendingModelId)
       .catch((err) => {
         this._fail('MODEL_CHAT_FAILED', err && err.message ? err.message : String(err));
       })
@@ -233,20 +259,139 @@ class ModelChat {
     return true;
   }
 
-  async _run() {
+  // Default registry id: CHAT_DEFAULT_MODEL, else the env-configured repo if
+  // it matches a verified entry, else the registry default. 'custom' covers
+  // deployments that point HF_REPO at a repo outside the registry.
+  _defaultModelId(est) {
+    if (this.opt.defaultModel && est.modelById(this.opt.defaultModel)) return this.opt.defaultModel;
+    if (this.opt.repoExplicit) {
+      const match = Object.values(est.MODELS).find((m) => m.repo === this.opt.hfRepo && m.quant === this.opt.quant);
+      if (match) return match.id;
+      return 'custom';
+    }
+    return est.DEFAULT_MODEL_ID;
+  }
+
+  // Maps a requested model id (or null for "default / last wanted") onto a
+  // verified registry entry. Unknown ids are a client error (400).
+  async _resolveModel(id) {
+    const est = await loadEstimate();
+    const want = id === undefined || id === null || id === ''
+      ? (this.pendingModelId || this._defaultModelId(est))
+      : String(id);
+    const entry = est.modelById(want);
+    if (entry) return entry;
+    if (want === 'custom' && this.opt.repoExplicit) {
+      // Legacy single-model deployment with its own HF_REPO: keep it working.
+      return {
+        id: 'custom',
+        label: `${this.opt.hfRepo} ${this.opt.quant}`,
+        repo: this.opt.hfRepo,
+        quant: this.opt.quant,
+        path: null,
+        sizeBytes: est.MODEL.sizeBytes,
+        sha256: null,
+        architecture: null,
+        license: null,
+        geometry: est.GEOMETRY,
+        custom: true,
+      };
+    }
+    throw new AppError(400, 'BAD_MODEL', `unknown model "${want}". Available models: ${Object.keys(est.MODELS).join(', ')}.`);
+  }
+
+  // Selects the model the NEXT generations run on. If a different model is
+  // already loaded and healthy this is a no-op; otherwise the runtime
+  // hot-swaps: unload the current model, wait for its RAM to actually come
+  // back, then provision (usually a no-op: both models stay cached) and load
+  // the requested one. Serialized so two concurrent selections cannot
+  // double-spawn llama-server.
+  async select(modelId) {
+    const entry = await this._resolveModel(modelId);
+    if (this.opt.upstreamBase) {
+      // An external runtime manages its own model set: record the choice,
+      // keep serving. Tests and worker deployments use this mode.
+      this.pendingModelId = entry.id;
+      this.loadedModel = entry.id;
+      this.modelInfo = this._modelInfoFromEntry(entry, false);
+      return entry;
+    }
+    if (this.state === 'ready' && this.loadedModel === entry.id && !this.startPromise) return entry;
+    const prev = this._switchChain;
+    let release;
+    this._switchChain = new Promise((r) => { release = r; });
+    await prev;
+    try {
+      if (this.state === 'ready' && this.loadedModel === entry.id && !this.startPromise) return entry;
+      if (this.startPromise) await this.startPromise.catch(() => {});
+      if (this.state === 'ready' && this.loadedModel === entry.id) return entry;
+      this.pendingModelId = entry.id;
+      await this._switchTo(entry);
+      if (this.state !== 'ready') {
+        const err = this.error || {};
+        throw new AppError(503, err.code || 'MODEL_NOT_READY', err.message || this.detail || 'the model did not become ready');
+      }
+      return entry;
+    } finally {
+      release();
+    }
+  }
+
+  // Hot-swap body: stop the loaded model, wait for its RAM, then run the
+  // normal provisioning + health chain for the new entry.
+  async _switchTo(entry) {
+    this.state = 'loading';
+    this.detail = `Switching to ${entry.label}. Unloading the loaded model first.`;
+    console.log(`[model-chat] switching to ${entry.id}`);
+    this.stop();
+    if (!(await this._awaitMemoryFree(entry))) return; // _fail already recorded
+    this.startPromise = this._run(entry.id).catch((err) => {
+      this._fail('MODEL_CHAT_FAILED', err && err.message ? err.message : String(err));
+    });
+    try {
+      await this.startPromise;
+    } finally {
+      this.startPromise = null;
+    }
+  }
+
+  // After stopping a model the RAM is not free instantly (llama-server is
+  // still exiting). Poll MemAvailable until the next model fits, or fail with
+  // the same actionable memory message the workflows use.
+  async _awaitMemoryFree(entry, timeoutMs = 45000) {
+    const est = this.est || (await loadEstimate());
+    const required = est.requiredBytesForModel(entry, this.opt.ctx, entry.sizeBytes);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      let available = Number.NaN;
+      try { available = est.memAvailableBytes(fs.readFileSync('/proc/meminfo', 'utf8')); } catch { return true; }
+      if (!Number.isFinite(available) || available >= required) return true;
+      if (Date.now() >= deadline) {
+        this._fail('MODEL_LOW_MEMORY', est.actionableMemoryMessage(required, available, this.opt.ctx));
+        return false;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+
+  async _run(modelId) {
     const est = await loadEstimate();
     this.est = est;
+
+    const entry = await this._resolveModel(modelId);
+    this.pendingModelId = entry.id;
 
     if (this.opt.upstreamBase) {
       // External runtime: assume it is already serving.
       this.state = 'ready';
       this.detail = 'Using an existing llama-server endpoint.';
-      this.modelInfo = this._modelInfoFromEstimate(est, { validatedLive: false });
+      this.loadedModel = entry.id;
+      this.modelInfo = this._modelInfoFromEntry(entry, false);
       return;
     }
 
     this.state = 'validating';
-    this.detail = 'Checking the runtime and model files.';
+    this.detail = `Checking the runtime and ${entry.label} model files.`;
 
     let binPath = this.opt.binPath;
     let modelPath = this.opt.modelPath;
@@ -266,7 +411,7 @@ class ModelChat {
         this._fail('MODEL_FILE_MISSING', `model file not found at "${modelPath || '(unset)'}". Set MODEL_GGUF_PATH or enable CHAT_AUTOPROVISION=1.`);
         return;
       }
-      const fetched = await this._provisionModel();
+      const fetched = await this._provisionModel(entry);
       if (!fetched) return;
       modelPath = fetched.path;
       bytes = fetched.bytes;
@@ -277,16 +422,16 @@ class ModelChat {
 
     // Report the model facts for directly configured files too (provisioning
     // fills this from the live HF validation instead).
-    if (!this.modelInfo) {
+    if (!this.modelInfo || this.modelInfo.repo !== entry.repo || this.modelInfo.quant !== entry.quant) {
       this.modelInfo = {
-        repo: this.opt.repoExplicit ? this.opt.hfRepo : null,
-        quant: this.opt.quant,
+        repo: entry.repo,
+        quant: entry.quant,
         path: modelPath,
         file: path.basename(modelPath),
         bytes,
-        sha256: null,
-        arch: null,
-        license: null,
+        sha256: entry.sha256,
+        arch: entry.architecture,
+        license: entry.license,
         validated_live: false,
       };
     }
@@ -294,10 +439,11 @@ class ModelChat {
       this.runtimeVersion = await this._binaryVersion(binPath);
     }
 
-    // Memory gate, measured like the workflows do - never assumed.
+    // Memory gate, measured like the workflows do - never assumed, and using
+    // the selected model's own geometry.
     this.state = 'checking-memory';
-    this.detail = `Checking free memory for context ${this.opt.ctx}.`;
-    const required = est.requiredBytes(this.opt.ctx, bytes || est.MODEL.sizeBytes);
+    this.detail = `Checking free memory for ${entry.label} at context ${this.opt.ctx}.`;
+    const required = est.requiredBytesForModel(entry, this.opt.ctx, bytes || entry.sizeBytes);
     let available = Number.NaN;
     try { available = est.memAvailableBytes(fs.readFileSync('/proc/meminfo', 'utf8')); } catch { /* non-Linux */ }
     if (Number.isFinite(available) && available < required) {
@@ -311,16 +457,16 @@ class ModelChat {
     await this._spawnServer(binPath, modelPath);
   }
 
-  _modelInfoFromEstimate(est, { validatedLive }) {
+  _modelInfoFromEntry(entry, validatedLive) {
     return {
-      repo: est.MODEL.repo,
-      quant: est.MODEL.quant,
-      path: est.MODEL.path,
-      file: path.basename(est.MODEL.path),
-      bytes: est.MODEL.sizeBytes,
-      sha256: est.MODEL.sha256,
-      arch: est.MODEL.architecture,
-      license: est.MODEL.license,
+      repo: entry.repo,
+      quant: entry.quant,
+      path: entry.path,
+      file: path.basename(entry.path || ''),
+      bytes: entry.sizeBytes,
+      sha256: entry.sha256,
+      arch: entry.architecture,
+      license: entry.license,
       validated_live: validatedLive,
     };
   }
@@ -437,8 +583,9 @@ class ModelChat {
     });
   }
 
-  async _provisionModel() {
+  async _provisionModel(entry) {
     this.state = 'provisioning-model';
+    this.detail = `Fetching ${entry.label} (resumable, checksum verified).`;
     const destDir = path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'model-cache');
     fs.mkdirSync(destDir, { recursive: true });
 
@@ -448,7 +595,7 @@ class ModelChat {
       const out = await this._runScript(
         path.join(__dirname, '..', 'scripts', 'model', 'validate-model.sh'),
         [],
-        { HF_REPO: this.opt.hfRepo, QUANT: this.opt.quant },
+        { HF_REPO: entry.repo, QUANT: entry.quant },
         'validate',
       );
       const kv = this.parseKeyValues(out);
@@ -458,9 +605,9 @@ class ModelChat {
     }
 
     const est = this.est;
-    const localPath = path.join(destDir, path.basename((meta && meta.gguf_file) || est.MODEL.path));
-    let sha = meta ? meta.gguf_sha256 : est.MODEL.sha256;
-    let bytes = meta ? Number(meta.gguf_size_bytes) : est.MODEL.sizeBytes;
+    const localPath = path.join(destDir, path.basename((meta && meta.gguf_file) || entry.path || 'unknown.gguf'));
+    let sha = meta ? meta.gguf_sha256 : entry.sha256;
+    let bytes = meta ? Number(meta.gguf_size_bytes) : entry.sizeBytes;
 
     if (fs.existsSync(localPath) && sha) {
       try {
@@ -471,8 +618,8 @@ class ModelChat {
           );
         });
         if (ok) {
-          this.detail = 'Verified model copy already on disk.';
-          this.modelInfo = this._infoFrom(meta, localPath, bytes, Boolean(meta));
+          this.detail = `Verified ${entry.label} copy already on disk.`;
+          this.modelInfo = this._infoFrom(meta, entry, localPath, bytes, Boolean(meta));
           return { path: localPath, bytes };
         }
         this._log('[download] local copy failed its checksum; re-downloading');
@@ -483,9 +630,14 @@ class ModelChat {
     if (!meta) {
       // HF unreachable: fall back to the recorded verified metadata, but only
       // if a verified copy already exists (checked above) or the download can
-      // still be checksum-verified against the recorded sha256.
-      sha = est.MODEL.sha256;
-      bytes = est.MODEL.sizeBytes;
+      // still be checksum-verified against the recorded sha256. Entries with
+      // no recorded checksum (custom HF_REPO) must never download blind.
+      if (!entry.sha256) {
+        this._fail('MODEL_VALIDATION_UNAVAILABLE', `Hugging Face validation failed for ${entry.repo} and no verified checksum is recorded for it; refusing to download unverified weights.`);
+        return null;
+      }
+      sha = entry.sha256;
+      bytes = entry.sizeBytes;
       this.detail = 'HF validation unavailable; using the recorded verified metadata for the download.';
     }
 
@@ -494,7 +646,7 @@ class ModelChat {
       path.join(__dirname, '..', 'scripts', 'model', 'download-model.sh'),
       [],
       {
-        DOWNLOAD_URL: meta ? meta.download_url : `https://huggingface.co/${est.MODEL.repo}/resolve/main/${est.MODEL.path}`,
+        DOWNLOAD_URL: meta ? meta.download_url : `https://huggingface.co/${entry.repo}/resolve/main/${entry.path}`,
         DEST_DIR: destDir,
         EXPECTED_SHA256: sha,
         EXPECTED_SIZE: String(bytes),
@@ -507,20 +659,20 @@ class ModelChat {
       this._fail('MODEL_FILE_MISSING', 'the model download finished without producing a file');
       return null;
     }
-    this.modelInfo = this._infoFrom(meta, finalPath, bytes, Boolean(meta));
+    this.modelInfo = this._infoFrom(meta, entry, finalPath, bytes, Boolean(meta));
     return { path: finalPath, bytes };
   }
 
-  _infoFrom(meta, localPath, bytes, validatedLive) {
+  _infoFrom(meta, entry, localPath, bytes, validatedLive) {
     return {
-      repo: (meta && meta.hf_repo) || this.opt.hfRepo,
-      quant: (meta && meta.quant) || this.opt.quant,
-      path: (meta && meta.gguf_file) || this.est.MODEL.path,
+      repo: (meta && meta.hf_repo) || entry.repo,
+      quant: (meta && meta.quant) || entry.quant,
+      path: (meta && meta.gguf_file) || entry.path,
       file: path.basename(localPath),
       bytes: bytes || 0,
-      sha256: (meta && meta.gguf_sha256) || this.est.MODEL.sha256,
-      arch: (meta && meta.gguf_arch) || this.est.MODEL.architecture,
-      license: (meta && meta.gguf_license) || this.est.MODEL.license,
+      sha256: (meta && meta.gguf_sha256) || entry.sha256,
+      arch: (meta && meta.gguf_arch) || entry.architecture,
+      license: (meta && meta.gguf_license) || entry.license,
       validated_live: validatedLive,
     };
   }
@@ -606,6 +758,7 @@ class ModelChat {
           if (health === 'ok') {
             settled = true;
             this.state = 'ready';
+            this.loadedModel = this.pendingModelId || this.loadedModel;
             this.detail = 'Model loaded. Chat is ready.';
             console.log(`[model-chat] ready on 127.0.0.1:${this.opt.port} (pid ${child.pid})`);
             resolve();
