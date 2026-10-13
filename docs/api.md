@@ -37,6 +37,23 @@ Pages and file downloads are not JSON. Errors on those routes show a plain HTML 
 
 Form versions for browsers: `POST /signup` and `POST /login` (form posts, redirect on success, `?error=CODE` on failure), and `POST /logout`.
 
+## API tokens (Bearer auth)
+
+Every signup and login response also contains a unique API token, so non-browser clients (curl, mobile apps, scripts) can call the same API as the logged-in user:
+
+```json
+{ "success": true, "data": { "user": { "id": "...", "username": "alice" }, "api_token": { "token": "sat_<user-id>.<secret>", "id": "<12 hex>", "created_at": "..." } } }
+```
+
+Send it on every call: `Authorization: Bearer <token>`. A Bearer request needs no cookies and no `X-Requested-With` header. A token grants exactly its own user's data - no other account's files, uploads, or channels are reachable with it.
+
+- `POST /api/tokens` - mint an additional token (rate limited to 20 per hour). The raw token is shown once; only its SHA-256 hash is stored.
+- `GET /api/tokens` - list your tokens (`id`, `created_at`, `revoked_at`) and which one is `current` for the request.
+- `DELETE /api/tokens/{id}` - revoke one token. Revoked tokens stop working immediately.
+- `POST /api/logout` - with a Bearer token, revokes exactly that token; with a browser cookie, ends the browser sessions and leaves API tokens untouched.
+
+Each login mints a new token, and tokens survive server restarts because they live in the private data repository. Keep them secret: anyone holding a token holds that account's API access until it is revoked.
+
 ## Files
 
 All routes below need a session and `X-Requested-With: fetch` where marked.
