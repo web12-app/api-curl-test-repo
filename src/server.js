@@ -27,6 +27,7 @@ const apiTokens = require('./api-tokens');
 const { PipsDb } = require('./pipsdb');
 const { Devices } = require('./devices');
 const { Social } = require('./social');
+const appRelease = require('./app-release');
 const pages = require('./pages');
 const offlinePage = require('./offline-page');
 
@@ -471,6 +472,25 @@ async function pageTubeWatch(ctx) {
   );
 }
 
+// ---- Pips Android install page (/app). Public on purpose: phone users land here straight from a
+// shared link, signed in or not. The download target is the latest published APK from GitHub;
+// app-release.latestRelease never throws, so the page renders even when GitHub is unreachable.
+const INSTALL_PAGE_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+// Overridable for tests (the fake GitHub API in test suites runs on localhost).
+let releaseApiBase = 'https://api.github.com';
+
+async function pageAppInstall(ctx) {
+  const info = await appRelease.latestRelease({ apiBase: releaseApiBase });
+  sendHtml(ctx.res, 200, pages.appInstallPage(info), { 'Content-Security-Policy': INSTALL_PAGE_CSP });
+}
+
+// Old shared links keep working: /install is an alias of /app.
+async function pageInstallAlias(ctx) {
+  return redirect(ctx.res, '/app');
+}
+
 async function pageTubeChannel(ctx) {
   requireConfigured(ctx);
   const user = await currentUser(ctx);
@@ -908,6 +928,7 @@ const ASSET_TYPES = {
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
 };
 
 async function serveAsset(ctx) {
@@ -1593,6 +1614,8 @@ const ROUTES = [
   },
   // ---- Model chat: page and JSON API. All behind login, like the rest of the app.
   { method: 'GET', path: '/chat', handler: pageChat },
+  { method: 'GET', path: '/app', handler: pageAppInstall },
+  { method: 'GET', path: '/install', handler: pageInstallAlias },
   { method: 'GET', path: '/api/chat/status', handler: apiChatStatus },
   { method: 'GET', path: '/v1/models', handler: apiV1Models },
   { method: 'POST', path: '/v1/chat/completions', handler: apiV1ChatCompletions, csrfExempt: true },
@@ -1695,6 +1718,7 @@ async function dispatch(req, res, auth, corsOrigins, modelChat) {
 
 function createServer(options = {}) {
   const env = options.env || process.env;
+  releaseApiBase = env.PIPS_RELEASE_API_BASE || 'https://api.github.com';
   const auth = buildAuth(env, options);
   const corsOrigins = parseCorsOrigins(env.CORS_ALLOWED_ORIGINS);
   const modelChat = buildModelChat(env, options);
