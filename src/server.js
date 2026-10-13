@@ -1484,6 +1484,14 @@ async function apiTubeHistory(ctx) {
   ok(ctx, 200, { videos: await files.tube.historyFor(user.username) });
 }
 
+// The owner's per-item viewer list, newest first.
+async function apiTubeViewers(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  const viewers = await files.tube.viewList(ctx.params.fileId, user);
+  ok(ctx, 200, { views: viewers });
+}
+
 // ---- Model chat API. Every route requires login. The model runs locally in a
 // supervised llama-server; a chat POST creates a job, the client polls it, and
 // DELETE cancels. Status never exposes more than model facts and state names.
@@ -1704,6 +1712,7 @@ const ROUTES = [
   { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/unpublish$`), handler: apiTubeUnpublish, keys: ['fileId'] },
   { method: 'PATCH', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}$`), handler: apiTubeVideoPatch, keys: ['fileId'] },
   { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/view$`), handler: apiTubeView, keys: ['fileId'] },
+  { method: 'GET', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/views$`), handler: apiTubeViewers, keys: ['fileId'] },
   { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/vote$`), handler: apiTubeVote, keys: ['fileId'] },
   { method: 'GET', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/comments$`), handler: apiTubeCommentsList, keys: ['fileId'] },
   { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/comments$`), handler: apiTubeCommentsAdd, keys: ['fileId'] },

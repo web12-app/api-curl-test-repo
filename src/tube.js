@@ -333,7 +333,7 @@ class TubeService {
       throw new AppError(400, 'FILE_REQUIRED', 'A file is required for videos and reels.');
     }
     if (!synthetic && !FILE_ID_RE.test(fileId)) throw new AppError(404, 'NOT_FOUND', 'File not found.');
-    const checkedTitle = checkVideoTitle(title);
+    const checkedTitle = checkTitleFor(kindName, title);
     const checkedDescription = checkOptionalText(
       description,
       VIDEO_DESCRIPTION_MAX,
@@ -444,6 +444,17 @@ class TubeService {
       }
       return { save: created, value: { views: Object.keys(bucket).length } };
     });
+  }
+
+  // The owner's view list for one item, newest first: [{ user, at }].
+  async viewList(fileId, owner) {
+    if (!FILE_ID_RE.test(fileId)) throw new AppError(404, 'NOT_FOUND', 'Video not found.');
+    const doc = await this.readDoc();
+    const rec = doc.videos[fileId];
+    if (!rec || rec.owner !== owner.username) throw new AppError(404, 'NOT_FOUND', 'Video not found.');
+    return Object.entries(doc.views[fileId] || {})
+      .map(([user, at]) => ({ user, at }))
+      .sort((a, b) => b.at.localeCompare(a.at));
   }
 
   // ---- votes (like / dislike, one live vote per user, YouTube-style)
@@ -705,6 +716,12 @@ function checkVideoTitle(title) {
     throw new AppError(400, 'INVALID_TITLE', `The video title must be 1-${VIDEO_TITLE_MAX} characters.`);
   }
   return title.trim();
+}
+
+// Posts may go out untitled (the text is the content); everything else needs a real title.
+function checkTitleFor(kind, title) {
+  if (kind === 'post' && (title === undefined || title === null || !String(title).trim())) return 'Post';
+  return checkVideoTitle(title);
 }
 
 module.exports = {
