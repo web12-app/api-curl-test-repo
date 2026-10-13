@@ -7,7 +7,8 @@
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
+const { execFile, execFileSync } = require('node:child_process');
+const { promisify } = require('node:util');
 const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
@@ -24,6 +25,7 @@ const FAST_ENV = {
 
 const TUN_JS = path.join(__dirname, '..', 'tunnel-client', 'tun.js');
 const JSONH = { 'Content-Type': 'application/json' };
+const runSh = promisify(execFile); // async: the in-process test server must serve curl during the installer run
 
 async function register(base, name) {
   const res = await fetch(`${base}/api/tunnel/register`, { method: 'POST', headers: JSONH, body: JSON.stringify({ name }) });
@@ -326,6 +328,51 @@ describe('tunnel client CLI (tunnel-client/tun.js)', () => {
       assert.fail('should have exited non-zero');
     } catch (err) {
       assert.match(String(err.stderr), /start needs a port/);
+    }
+  });
+});
+
+describe('tunnel.sh installer', () => {
+  test('serves a valid sh script pinned to the server it came from', async () => {
+    const app = await startServer({ env: FAST_ENV });
+    try {
+      const res = await fetch(`${app.base}/tunnel.sh`);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') || '', /shellscript/);
+      const body = await res.text();
+      assert.match(body, /client\.tar\.gz/);
+      assert.match(body, /tar -xzf/);
+      assert.ok(body.includes(app.base), 'the installer defaults to the server that served it');
+      assert.ok(!body.includes('\r\n'), 'no CRLF: the script must stay sh-safe');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tun-sh-'));
+      const f = path.join(dir, 'tunnel.sh');
+      fs.writeFileSync(f, body);
+      execFileSync('sh', ['-n', f]); // syntax check
+      fs.rmSync(dir, { recursive: true, force: true });
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('running the installer installs a working client', async () => {
+    const app = await startServer({ env: FAST_ENV });
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'tun-home-'));
+    try {
+      const body = await (await fetch(`${app.base}/tunnel.sh`)).text();
+      const inst = path.join(home, 'inst.sh');
+      fs.writeFileSync(inst, body);
+      await runSh('sh', [inst], {
+        encoding: 'utf8',
+        env: { ...process.env, HOME: home, TUNNEL_HOME: path.join(home, '.pips-tunnel'), TUN_SERVER: app.base },
+      });
+      const dest = path.join(home, '.pips-tunnel');
+      const help = execFileSync(process.execPath, [path.join(dest, 'tun.js'), '--help'], { encoding: 'utf8' });
+      assert.match(help, /tun start <port> <app-name>/);
+      assert.ok(fs.statSync(path.join(dest, 'tun')).mode & 0o111, 'the tun wrapper is executable');
+      assert.ok(fs.existsSync(path.join(home, 'README.md')) === false, 'nothing leaked outside TUNNEL_HOME');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      await app.close();
     }
   });
 });
