@@ -415,3 +415,20 @@ test('a full channel page joins subscribers, kinds, views, and likes for the req
     assert.ok(page.body.data.videos.some((v) => v.kind === 'post' && v.title === 'Text post'));
   });
 });
+
+test('the owner can list viewers of one item; others get a 404', async () => {
+  await withApp(async (app) => {
+    const alice = await setupChannel(app);
+    const bob = await signup(app, 'bob');
+    const clip = await upload(app, alice.cookie, 'clip.mp4', mp4Bytes(), { type: 'video/mp4' });
+    await post(app, alice.cookie, `/api/tube/videos/${clip.id}/publish`, { title: 'Seen', kind: 'video' });
+    await post(app, bob.cookie, `/api/tube/videos/${clip.id}/view`);
+
+    const owner = await jsonOf(await authed(app, alice.cookie, `/api/tube/videos/${clip.id}/views`));
+    assert.equal(owner.status, 200);
+    assert.deepEqual(owner.body.data.views, [{ user: 'bob', at: owner.body.data.views[0].at }]);
+
+    const stranger = await jsonOf(await authed(app, bob.cookie, `/api/tube/videos/${clip.id}/views`));
+    assert.equal(stranger.status, 404);
+  });
+});
