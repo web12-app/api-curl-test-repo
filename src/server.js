@@ -1341,14 +1341,14 @@ const TUBE_WRITES_PER_HOUR = 120;
 
 async function apiTubeFeed(ctx) {
   const files = fileServices(ctx);
-  await requireUser(ctx);
-  ok(ctx, 200, { videos: await files.tube.feed() });
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { videos: await files.tube.feed(user.username) });
 }
 
 async function apiTubeMyChannelGet(ctx) {
   const files = fileServices(ctx);
   const user = await requireUser(ctx);
-  ok(ctx, 200, { channel: await files.tube.getChannel(user) });
+  ok(ctx, 200, { channel: await files.tube.getChannel(user, user.username) });
 }
 
 async function apiTubeMyChannelPut(ctx) {
@@ -1362,8 +1362,8 @@ async function apiTubeMyChannelPut(ctx) {
 
 async function apiTubeChannelGet(ctx) {
   const files = fileServices(ctx);
-  await requireUser(ctx);
-  const view = await files.tube.channelPage(ctx.params.user);
+  const user = await requireUser(ctx);
+  const view = await files.tube.channelPage(ctx.params.user, user.username);
   if (!view) throw new AppError(404, 'NOT_FOUND', 'No such channel.');
   ok(ctx, 200, view);
 }
@@ -1385,6 +1385,103 @@ async function apiTubeUnpublish(ctx) {
   hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
   await files.tube.unpublishVideo(ctx.params.fileId, user);
   ok(ctx, 200, { ok: true });
+}
+
+// Text-only posts: same publish contract without a file id (a synthetic id is assigned).
+async function apiTubePostCreate(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  const { video, created } = await files.tube.publishVideo('', user, { ...body, kind: 'post' });
+  ok(ctx, created ? 201 : 200, { video });
+}
+
+// Owner-only edit of a published item (title, description, thumbnail, duration).
+async function apiTubeVideoPatch(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  const { video } = await files.tube.patchVideo(ctx.params.fileId, user, body);
+  ok(ctx, 200, { video });
+}
+
+// Deletes the signed-in user's own channel along with its published items.
+async function apiTubeMyChannelDelete(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  const removed = await files.tube.deleteChannel(user);
+  if (!removed) throw new AppError(404, 'NOT_FOUND', 'No such channel.');
+  ok(ctx, 200, { ok: true });
+}
+
+// Records a unique view (one per user per item). Like the other tube writes it rewrites the shared
+// document, so the same CSRF and hourly-cap rules apply.
+async function apiTubeView(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  const { views } = await files.tube.recordView(ctx.params.fileId, user.username);
+  ok(ctx, 200, { views });
+}
+
+// Like / dislike a published item; same vote again toggles off.
+async function apiTubeVote(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  const vote = typeof body.vote === 'string' ? body.vote : '';
+  ok(ctx, 200, await files.tube.voteVideo(ctx.params.fileId, vote, user.username));
+}
+
+async function apiTubeCommentsList(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { comments: await files.tube.listComments(ctx.params.fileId, user.username) });
+}
+
+async function apiTubeCommentsAdd(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  const { comment } = await files.tube.addComment(ctx.params.fileId, user.username, body ? body.text : undefined);
+  ok(ctx, 201, { comment });
+}
+
+async function apiTubeCommentVote(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  const vote = typeof body.vote === 'string' ? body.vote : '';
+  ok(ctx, 200, await files.tube.voteComment(ctx.params.fileId, ctx.params.commentId, vote, user.username));
+}
+
+// Toggles a subscription to the channel owned by :user.
+async function apiTubeSubscribe(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  hourlyLimit(ctx, `tube-write:${user.id}`, TUBE_WRITES_PER_HOUR, 'Too many Tube changes. Try again later.');
+  ok(ctx, 200, { ok: true, ...(await files.tube.subscribeChannel(ctx.params.user, user.username)) });
+}
+
+// The signed-in user's watch history, newest view first.
+async function apiTubeHistory(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  ok(ctx, 200, { videos: await files.tube.historyFor(user.username) });
 }
 
 // ---- Model chat API. Every route requires login. The model runs locally in a
@@ -1603,7 +1700,27 @@ const ROUTES = [
     keys: ['user'],
   },
   { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/publish$`), handler: apiTubePublish, keys: ['fileId'] },
+  { method: 'POST', path: '/api/tube/posts', handler: apiTubePostCreate },
   { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/unpublish$`), handler: apiTubeUnpublish, keys: ['fileId'] },
+  { method: 'PATCH', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}$`), handler: apiTubeVideoPatch, keys: ['fileId'] },
+  { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/view$`), handler: apiTubeView, keys: ['fileId'] },
+  { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/vote$`), handler: apiTubeVote, keys: ['fileId'] },
+  { method: 'GET', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/comments$`), handler: apiTubeCommentsList, keys: ['fileId'] },
+  { method: 'POST', pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/comments$`), handler: apiTubeCommentsAdd, keys: ['fileId'] },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/tube/videos/${FILE_ID}/comments/([a-f0-9]{12})/vote$`),
+    handler: apiTubeCommentVote,
+    keys: ['fileId', 'commentId'],
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/tube/channels/(${USERNAME_RE.source.slice(1, -1)})/subscribe$`),
+    handler: apiTubeSubscribe,
+    keys: ['user'],
+  },
+  { method: 'GET', path: '/api/tube/history', handler: apiTubeHistory },
+  { method: 'DELETE', path: '/api/tube/my-channel', handler: apiTubeMyChannelDelete },
   { method: 'GET', path: '/tube', handler: pageTube },
   { method: 'GET', pattern: new RegExp(`^/tube/watch/${FILE_ID}$`), handler: pageTubeWatch, keys: ['fileId'] },
   {
