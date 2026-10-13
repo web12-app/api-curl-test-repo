@@ -707,4 +707,98 @@ function appInstallPage(info) {
 `;
 }
 
-module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, chatPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage, appInstallPage };
+const TUNNEL_CSS = `
+      * { box-sizing: border-box; }
+      body.tun { margin: 0; font-family: system-ui, sans-serif; color: #e6edf3; background: #0b1020; overflow-x: hidden; }
+      body.tun a { color: #7ee2ff; }
+      .tun .glow { position: fixed; width: 46rem; height: 46rem; border-radius: 50%; filter: blur(90px); opacity: .16; pointer-events: none; z-index: 0; }
+      .tun .g1 { background: #7a5cff; top: -18rem; left: -14rem; }
+      .tun .g2 { background: #4f8cff; bottom: -20rem; right: -16rem; }
+      .wrap { position: relative; z-index: 1; max-width: 34rem; margin: 0 auto; padding: 1.8rem 1rem 2.6rem; display: flex; flex-direction: column; gap: 1rem; }
+      .hero { background: linear-gradient(160deg, #16132e 0%, #101522 70%); border: 1px solid #2a2d52; border-radius: 20px; padding: 1.7rem 1.4rem 1.5rem; text-align: center; box-shadow: 0 18px 50px rgba(0,0,0,.45); }
+      .hero h1 { margin: 0; font-size: 1.7rem; letter-spacing: -.02em; color: #fff; }
+      .hero .tagline { margin: .4rem 0 0; color: #9aa8c0; font-size: .95rem; line-height: 1.5; }
+      .tun-btn { display: flex; align-items: center; justify-content: center; gap: .55rem; margin: 1.2rem auto .7rem; max-width: 22rem; padding: .95rem 1.4rem; border-radius: 14px; background: linear-gradient(135deg, #7a5cff, #4f8cff); color: #fff; font-size: 1.05rem; font-weight: 800; text-decoration: none; letter-spacing: .01em; box-shadow: 0 10px 26px rgba(79,90,255,.35); transition: transform .12s ease, box-shadow .12s ease; }
+      .tun-btn:hover { transform: translateY(-2px); box-shadow: 0 14px 32px rgba(79,90,255,.45); }
+      .tun-sub { margin: 0; color: #8a97b1; font-size: .84rem; }
+      .tun-sub b { color: #c6d0e2; font-weight: 600; }
+      .panel { background: #12182a; border: 1px solid #232c44; border-radius: 16px; padding: 1.1rem 1.25rem 1.25rem; }
+      .panel h2 { margin: 0 0 .7rem; font-size: 1.02rem; color: #fff; }
+      ol.steps { list-style: none; padding-left: 0; margin: 0; display: flex; flex-direction: column; gap: .7rem; color: #b9c4d8; font-size: .92rem; line-height: 1.6; }
+      ol.steps li { display: flex; gap: .7rem; align-items: flex-start; }
+      .step-num { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 1.45rem; height: 1.45rem; border-radius: 50%; background: #1c2740; border: 1px solid #33406b; color: #8fb0ff; font-size: .78rem; font-weight: 700; margin-top: .15rem; }
+      pre.code { margin: .9rem 0 0; background: #0a0f1d; border: 1px solid #232c44; border-radius: 10px; padding: .8rem .9rem; overflow-x: auto; color: #9fe8c3; font: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; line-height: 1.6; }
+      .hint { margin: .8rem 0 0; color: #6d7a94; font-size: .8rem; line-height: 1.55; }
+      ul.live { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .5rem; }
+      ul.live li { display: flex; justify-content: space-between; gap: 1rem; align-items: center; background: #0a0f1d; border: 1px solid #232c44; border-radius: 10px; padding: .6rem .8rem; font-size: .9rem; }
+      ul.live a { text-decoration: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      ul.live a:hover { text-decoration: underline; }
+      ul.live .meta { color: #6d7a94; font-size: .78rem; white-space: nowrap; }
+      .empty { margin: 0; color: #6d7a94; font-size: .88rem; }
+      .tun-foot { text-align: center; color: #5c6a85; font-size: .82rem; display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+      .tun-foot a { color: #7ee2ff; text-decoration: none; }
+      .tun-foot a:hover { text-decoration: underline; }`;
+
+// The /tun landing page: download, three-step quickstart, and the list of
+// currently connected tunnels. Standalone like the /app install page.
+function tunnelPage({ tunnels }) {
+  const rows = tunnels
+    .map(
+      (t) =>
+        `<li><a href="/tun/${escapeHtml(t.name)}">/tun/${escapeHtml(t.name)}</a><span class="meta">${t.pending} pending &middot; ${t.answered} answered</span></li>`,
+    )
+    .join('\n        ');
+  const live = rows
+    ? `<ul class="live">\n        ${rows}\n      </ul>`
+    : '<p class="empty">No tunnels are connected right now. Run the client below and this list fills in.</p>';
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1020">
+    <title>Pips Tunnel — publish your localhost</title>
+    <style>${TUNNEL_CSS}
+    </style>
+  </head>
+  <body class="tun">
+    <div class="glow g1" aria-hidden="true"></div>
+    <div class="glow g2" aria-hidden="true"></div>
+    <main class="wrap">
+      <section class="hero">
+        <h1>Pips Tunnel</h1>
+        <p class="tagline">Put any localhost app on this server's public URL. Run one command, share one link.</p>
+        <a class="tun-btn" href="/api/tunnel/client.tar.gz" download>tunnel.tar.gz &nbsp;·&nbsp; download</a>
+        <p class="tun-sub">Zero dependencies &middot; needs <b>Node 18+</b> &middot; macOS / Linux / Windows</p>
+      </section>
+
+      <section class="panel">
+        <h2>Three steps</h2>
+        <ol class="steps">
+          <li><span class="step-num">1</span><span>Download and unpack the client (Windows: unpack any way you like).</span></li>
+          <li><span class="step-num">2</span><span>Start it against your app's local port and pick any app name.</span></li>
+          <li><span class="step-num">3</span><span>Open <b>/tun/&lt;app-name&gt;</b> here — that URL now serves your localhost.</span></li>
+        </ol>
+        <pre class="code">tar -xzf tunnel.tar.gz &amp;&amp; cd tunnel
+./tun start 5000 test
+# → https://&lt;this-server&gt;/tun/test</pre>
+        <p class="hint">Windows: use <b>node tun.js start 5000 test</b>. Other flags: <b>./tun list</b>, <b>./tun close &lt;name&gt;</b>, and <b>--server &lt;url&gt;</b> to target any other host (ngrok, Cloudflare, anything in front of this app). The /tun/&lt;name&gt; prefix is stripped before your app sees the request.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Live tunnels</h2>
+        ${live}
+      </section>
+
+      <footer class="tun-foot">
+        <a href="/">Open web app</a>
+        <a href="/app">Get the Pips app</a>
+        <a href="/api/health">Service status</a>
+      </footer>
+    </main>
+  </body>
+</html>
+`;
+}
+
+module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, chatPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage, appInstallPage, tunnelPage };

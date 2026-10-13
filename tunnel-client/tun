@@ -1,0 +1,4 @@
+#!/bin/sh
+# tun — wrapper so the client runs as ./tun on macOS/Linux.
+# On Windows use: node tun.js <args>
+exec node "$(dirname "$0")/tun.js" "$@"
