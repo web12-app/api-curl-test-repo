@@ -781,9 +781,9 @@ function tunnelPage({ tunnels, base = '' }) {
           <li><span class="step-num">3</span><span>Open <b>/tun/&lt;app-name&gt;</b> here — that URL now serves your localhost.</span></li>
         </ol>
         <pre class="code">curl -fsSL ${escBase}/tunnel.sh | sh
-~/.pips-tunnel/tun start 5000 test
-# → ${escBase}/tun/test</pre>
-        <p class="hint">No curl? Download <b>tunnel.tar.gz</b> above and unpack it: <b>tar -xzf tunnel.tar.gz &amp;&amp; cd tunnel &amp;&amp; ./tun start 5000 test</b>. Windows: <b>node tun.js start 5000 test</b>. More: <b>tun list</b>, <b>tun close &lt;name&gt;</b>, and <b>--server &lt;url&gt;</b> to target any other host (ngrok, Cloudflare, anything in front of this app). The /tun/&lt;name&gt; prefix is stripped before your app sees the request.</p>
+~/.pips-tunnel/tun start 5000
+# → ${escBase}/tun/&lt;name&gt;  (a random name is assigned and printed)</pre>
+        <p class="hint">Want a stable URL? Create a token: <b>curl -X POST ${escBase}/api/tunnel/account</b>, run <b>tun login &lt;token&gt;</b> once, then <b>tun start 5000 myname</b> keeps <b>/tun/myname</b> yours. Inspect traffic and logs at <b>${escBase}/tun/dashboard</b>. No curl? Download <b>tunnel.tar.gz</b> above and unpack it: <b>tar -xzf tunnel.tar.gz &amp;&amp; cd tunnel &amp;&amp; ./tun start 5000</b>. Windows: <b>node tun.js start 5000</b>. More: <b>tun list</b>, <b>tun close &lt;name&gt;</b>, and <b>--server &lt;url&gt;</b> to target any other host (ngrok, Cloudflare, anything in front of this app). The /tun/&lt;name&gt; prefix is stripped before your app sees the request.</p>
       </section>
 
       <section class="panel">
@@ -802,4 +802,191 @@ function tunnelPage({ tunnels, base = '' }) {
 `;
 }
 
-module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, chatPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage, appInstallPage, tunnelPage };
+// ---- Tunnel v2: visitor error pages, dashboard login, dashboard ----
+
+// What visitors see when a tunnel cannot serve their request. Status codes are
+// set by the caller in server.js. The offline page reloads itself so a client
+// that connects a moment later picks the visitor up without a manual refresh.
+function tunnelErrorPage({ kind, name, base = '' }) {
+  const escName = escapeHtml(name);
+  const escBase = escapeHtml(base);
+  const variants = {
+    offline: {
+      title: 'Tunnel offline',
+      body: `No app is connected to <b>/tun/${escName}</b> right now.`,
+      hint: 'Start the local client on the machine that runs the app, and this page will pick it up by itself.',
+      refresh: true,
+    },
+    down: {
+      title: 'Local app not answering',
+      body: `The tunnel <b>/tun/${escName}</b> is connected, but <b>http://localhost</b> on the other side refused the connection or timed out.`,
+      hint: 'Check that the local app is actually running on the port the client was pointed at.',
+      refresh: false,
+    },
+    slow: {
+      title: 'Tunnel did not answer in time',
+      body: `The app behind <b>/tun/${escName}</b> accepted the request but did not answer in time.`,
+      hint: 'The local app may be slow or stuck — try again in a moment.',
+      refresh: false,
+    },
+    busy: {
+      title: 'Tunnel is busy',
+      body: `<b>/tun/${escName}</b> has too many queued requests right now.`,
+      hint: 'Wait a moment and reload — the queue drains as the local app answers.',
+      refresh: false,
+    },
+  };
+  const v = variants[kind] || variants.offline;
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1020">
+    ${v.refresh ? '<meta http-equiv="refresh" content="10">\n    ' : ''}<title>${v.title} — Pips Tunnel</title>
+    <style>${TUNNEL_CSS}
+      .tun-card { max-width: 30rem; margin: 14vh auto 0; position: relative; z-index: 1; text-align: center; background: #12182a; border: 1px solid #232c44; border-radius: 16px; padding: 2rem 1.5rem 1.7rem; }
+      .tun-card h1 { margin: 0 0 .5rem; font-size: 1.4rem; color: #fff; }
+      .tun-card .name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #8fb0ff; }
+      .tun-card p { color: #9aa8c0; font-size: .95rem; line-height: 1.6; margin: .4rem 0; }
+      .tun-card .hint { color: #6d7a94; font-size: .82rem; }
+      .tun-card a.back { display: inline-block; margin-top: 1.1rem; padding: .6rem 1.2rem; border-radius: 10px; background: linear-gradient(135deg, #7a5cff, #4f8cff); color: #fff; font-weight: 700; text-decoration: none; font-size: .92rem; }
+    </style>
+  </head>
+  <body class="tun">
+    <div class="glow g1" aria-hidden="true"></div>
+    <div class="glow g2" aria-hidden="true"></div>
+    <main class="tun-card">
+      <h1>${v.title}</h1>
+      <p>${v.body}</p>
+      <p class="hint">${v.hint}${v.refresh ? ' This page retries every 10 seconds.' : ''}</p>
+      <a class="back" href="${escBase}/tun">Back to Pips Tunnel</a>
+    </main>
+  </body>
+</html>
+`;
+}
+
+// Login card for the tunnel dashboard: paste a tunt_ token to inspect traffic.
+function tunnelLoginPage({ error, base = '' }) {
+  const escBase = escapeHtml(base);
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1020">
+    <title>Tunnel dashboard — Pips Tunnel</title>
+    <style>${TUNNEL_CSS}
+      .tun-card { max-width: 26rem; margin: 14vh auto 0; position: relative; z-index: 1; text-align: center; background: #12182a; border: 1px solid #232c44; border-radius: 16px; padding: 2rem 1.5rem 1.7rem; }
+      .tun-card h1 { margin: 0 0 .5rem; font-size: 1.4rem; color: #fff; }
+      .tun-card p { color: #9aa8c0; font-size: .95rem; line-height: 1.6; margin: .4rem 0; }
+      .tun-card form { display: flex; flex-direction: column; gap: .8rem; margin-top: 1.2rem; }
+      .tun-card input { background: #0a0f1d; border: 1px solid #232c44; border-radius: 10px; color: #e6edf3; padding: .8rem .9rem; font: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9rem; }
+      .tun-card input:focus { outline: none; border-color: #7a5cff; }
+      .tun-card button { border: 0; border-radius: 10px; padding: .8rem 1rem; background: linear-gradient(135deg, #7a5cff, #4f8cff); color: #fff; font-weight: 800; font-size: 1rem; cursor: pointer; }
+      .tun-error { background: #2a1420; border: 1px solid #7a2b47; color: #ff9db5; border-radius: 10px; padding: .6rem .8rem; font-size: .86rem; margin-top: 1rem; }
+      .tun-card a.back { display: inline-block; margin-top: 1.1rem; color: #7ee2ff; font-size: .86rem; text-decoration: none; }
+    </style>
+  </head>
+  <body class="tun">
+    <div class="glow g1" aria-hidden="true"></div>
+    <div class="glow g2" aria-hidden="true"></div>
+    <main class="tun-card">
+      <h1>Tunnel dashboard</h1>
+      <p>Paste your tunnel token (<b>tunt_…</b>) to inspect traffic and logs.</p>
+      ${error ? `<div class="tun-error">${escapeHtml(error)}</div>` : ''}
+      <form method="post" action="/tun/dashboard">
+        <input type="password" name="token" placeholder="tunt_…" autofocus autocomplete="off">
+        <button type="submit">Open dashboard</button>
+      </form>
+      <a class="back" href="${escBase}/tun">Back to Pips Tunnel</a>
+    </main>
+  </body>
+</html>
+`;
+}
+
+// The traffic inspector for one tunnel account: owned names with live/offline
+// badges, per-name counters and the most recent proxied requests per name.
+function tunnelDashboardPage({ account, names, tunnels, base = '' }) {
+  const escBase = escapeHtml(base);
+  const liveNow = names.filter((n) => n.live).length;
+  const totalServed = names.reduce((sum, n) => sum + (Number(n.served) || 0), 0);
+  const stat = (label, value) =>
+    `<div class="stat"><span class="stat-num">${escapeHtml(String(value))}</span><span class="stat-label">${escapeHtml(label)}</span></div>`;
+  const cards =
+    `<div class="stats">${stat('names owned', names.length)}${stat('live now', liveNow)}${stat('requests served', totalServed)}</div>`;
+  const panels = names
+    .map((n) => {
+      const live = tunnels.some((t) => t.name === n.name);
+      const badge = live ? '<span class="badge live-badge">live</span>' : '<span class="badge off-badge">offline</span>';
+      const lastSeen = n.lastSeen ? new Date(n.lastSeen).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : 'never';
+      const rows = (n.logs || [])
+        .map(
+          (l) =>
+            `<tr><td>${new Date(l.t).toISOString()}</td><td>${escapeHtml(l.method)}</td><td class="mono">${escapeHtml(l.path)}</td><td>${escapeHtml(String(l.status))}</td><td>${escapeHtml(String(l.ms))}</td><td>${escapeHtml(String(l.bytes))}</td></tr>`,
+        )
+        .join('\n            ');
+      const table = rows
+        ? `<table class="logs"><thead><tr><th>time (UTC)</th><th>method</th><th>path</th><th>status</th><th>ms</th><th>bytes</th></tr></thead><tbody>
+            ${rows}
+          </tbody></table>`
+        : '<p class="empty">No requests through this name yet.</p>';
+      return `<section class="panel name-panel">
+        <h2><span class="mono">/tun/${escapeHtml(n.name)}</span> ${badge}</h2>
+        <p class="meta">${Number(n.served) || 0} served &middot; ${Number(n.bytes) || 0} bytes &middot; last seen ${escapeHtml(lastSeen)}</p>
+        ${table}
+      </section>`;
+    })
+    .join('\n      ');
+  const body = names.length
+    ? panels
+    : '<p class="empty">No tunnel names belong to this account yet. Run <b>tun start &lt;port&gt; &lt;name&gt;</b> with your token logged in to claim one.</p>';
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1020">
+    <title>Tunnel dashboard — Pips Tunnel</title>
+    <style>${TUNNEL_CSS}
+      .wrap { max-width: 46rem; }
+      .stats { display: flex; gap: .8rem; }
+      .stat { flex: 1; background: #12182a; border: 1px solid #232c44; border-radius: 14px; padding: .9rem 1rem; display: flex; flex-direction: column; gap: .2rem; }
+      .stat-num { color: #fff; font-size: 1.35rem; font-weight: 800; }
+      .stat-label { color: #6d7a94; font-size: .78rem; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .badge { display: inline-block; border-radius: 999px; padding: .12rem .6rem; font-size: .7rem; font-weight: 800; letter-spacing: .04em; vertical-align: middle; }
+      .live-badge { background: #123529; border: 1px solid #1f7a4d; color: #5eeaa4; }
+      .off-badge { background: #2a1420; border: 1px solid #7a2b47; color: #ff9db5; }
+      .name-panel .meta { margin: 0 0 .8rem; color: #6d7a94; font-size: .8rem; }
+      table.logs { width: 100%; border-collapse: collapse; font-size: .8rem; }
+      table.logs th { text-align: left; color: #6d7a94; font-weight: 600; padding: .35rem .5rem; border-bottom: 1px solid #232c44; }
+      table.logs td { padding: .35rem .5rem; border-bottom: 1px solid #1a2138; color: #b9c4d8; }
+      table.logs td.mono { color: #9fe8c3; word-break: break-all; }
+      .logout { color: #6d7a94; font-size: .82rem; text-align: center; }
+    </style>
+  </head>
+  <body class="tun">
+    <div class="glow g1" aria-hidden="true"></div>
+    <div class="glow g2" aria-hidden="true"></div>
+    <main class="wrap">
+      <section class="hero">
+        <h1>Tunnel dashboard</h1>
+        <p class="tagline">${escapeHtml(account.label || 'Tunnel account')} &middot; token <b>${escapeHtml(account.tokenMask)}</b></p>
+      </section>
+      ${cards}
+      ${body}
+      <p class="logout">To sign out, just reopen <b>/tun/dashboard</b> without the token.</p>
+      <footer class="tun-foot">
+        <a href="${escBase}/tun">Pips Tunnel</a>
+        <a href="/api/health">Service status</a>
+      </footer>
+    </main>
+  </body>
+</html>
+`;
+}
+
+module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, chatPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage, appInstallPage, tunnelPage, tunnelErrorPage, tunnelLoginPage, tunnelDashboardPage };

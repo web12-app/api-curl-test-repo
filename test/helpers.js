@@ -20,6 +20,7 @@ async function startServer({ env = TEST_ENV, now } = {}) {
   return {
     base: `http://127.0.0.1:${port}`,
     storage,
+    server,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }

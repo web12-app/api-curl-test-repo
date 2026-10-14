@@ -15,13 +15,22 @@ const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 const freshId = () => randomBytes(12).toString('hex');
 
+// Anonymous tunnels get a friendly random name like "swift-otter-3f2a".
+const ADJ = ['swift', 'calm', 'bold', 'lucky', 'quiet', 'brave', 'royal', 'smart', 'wild', 'fresh', 'noble', 'quick', 'sunny', 'sharp', 'clever', 'proud'];
+const NOUN = ['otter', 'falcon', 'maple', 'harbor', 'ember', 'lynx', 'cedar', 'comet', 'willow', 'ridge', 'sparrow', 'badger', 'puffin', 'marble', 'beacon', 'finch'];
+const randomName = () => `${ADJ[randomBytes(1)[0] % ADJ.length]}-${NOUN[randomBytes(1)[0] % NOUN.length]}-${randomBytes(2).toString('hex')}`;
+
 class Tunnels {
-  constructor({ now = Date.now, waitMs = 30000, pollWaitMs = 20000, ttlMs = 90000 } = {}) {
+  constructor({ now = Date.now, waitMs = 30000, pollWaitMs = 20000, ttlMs = 90000, maxTunnels = 200, maxQueue = 64 } = {}) {
     this.now = now;
     this.waitMs = waitMs; // how long /tun/<name> waits for the client's response
     this.pollWaitMs = pollWaitMs; // how long a client poll blocks before "nothing yet"
     this.ttlMs = ttlMs; // a tunnel dies after this long without any client activity
+    this.maxTunnels = maxTunnels; // overload guard: connected tunnels at once
+    this.maxQueue = maxQueue; // overload guard: queued requests per tunnel
     this.map = new Map();
+    this.claims = new Map(); // name -> accountId: names reserved by tunnel accounts (filled by the server)
+    this.store = null; // the TunnelStore, attached by the server after construction
   }
 
   normalizeName(name) {
@@ -50,9 +59,15 @@ class Tunnels {
     }
   }
 
-  register(rawName) {
+  register(rawName, { accountId } = {}) {
     const name = this.validateName(rawName);
     this.sweep();
+    if (this.claims.size && this.claims.has(name) && this.claims.get(name) !== accountId) {
+      throw new AppError(403, 'NAME_RESERVED', 'That tunnel name is reserved by an account. Log in with your token to use it.');
+    }
+    if (!this.map.has(name) && this.map.size >= this.maxTunnels) {
+      throw new AppError(429, 'TUNNEL_LIMIT', `Too many tunnels are connected right now (limit ${this.maxTunnels}). Try again later.`);
+    }
     const existing = this.map.get(name);
     if (existing) {
       // Takeover: a fresh client wins; the old one is told so on its next poll.
@@ -70,7 +85,8 @@ class Tunnels {
       answered: 0,
     };
     this.map.set(name, t);
-    return { name: t.name, clientId: t.clientId };
+    if (accountId) this.claims.set(name, accountId);
+    return { name: t.name, clientId: t.clientId, reserved: Boolean(accountId) };
   }
 
   // Resolve everyone waiting on this tunnel and forget it.
@@ -98,6 +114,9 @@ class Tunnels {
     this.sweep();
     const t = this.map.get(this.normalizeName(name));
     if (!t) throw new AppError(404, 'TUNNEL_OFFLINE', `No tunnel app named "${name}" is connected. Start it locally with: tun start <port> ${name}`);
+    if (t.queue.length >= this.maxQueue) {
+      throw new AppError(503, 'TUNNEL_BUSY', 'This tunnel has too many queued requests right now; retry shortly.');
+    }
     const id = freshId();
     const entry = { id, method, path, headers, body, ts: this.now() };
     t.queue.push(entry);
@@ -169,8 +188,21 @@ class Tunnels {
         served: t.served,
         answered: t.answered,
         ageMs: this.now() - t.registeredAt,
+        reserved: this.claims.has(t.name),
       }));
+  }
+
+  // One number per counter, summed over every connected tunnel.
+  stats() {
+    this.sweep();
+    const totals = { tunnels: this.map.size, pending: 0, served: 0, answered: 0 };
+    for (const t of this.map.values()) {
+      totals.pending += t.queue.length;
+      totals.served += t.served;
+      totals.answered += t.answered;
+    }
+    return totals;
   }
 }
 
-module.exports = { Tunnels, NAME_RE, freshId };
+module.exports = { Tunnels, NAME_RE, freshId, randomName };

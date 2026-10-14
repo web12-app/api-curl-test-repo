@@ -5,7 +5,7 @@
 const USER_ID_RE = /^[a-f0-9]{32}$/;
 const USERNAME_RE = /^[a-z0-9_]{3,32}$/;
 // system/tube.json is the single Tube document (channels + published videos), shared by every user.
-const ALLOWED_PATH_RE = /^(users\/[a-f0-9]{32}\.json|system\/usernames\/[a-z0-9_]{3,32}\.json|system\/tube\.json|uploads\/[a-f0-9]{32}\/manifest\.json|shares\/[a-f0-9]{64}\.json|upload-links\/[a-f0-9]{64}\.json|tokens\/[a-f0-9]{32}\.json|pipsdb\/[a-f0-9]{32}\.json|devices\/[a-f0-9]{32}\.json|follows\/[a-f0-9]{32}\.json|inbox\/[a-f0-9]{32}\.json|notifications\/[a-f0-9]{32}\.json|messages\/[a-f0-9]{32}\.[a-f0-9]{32}\.json|attachments\/[a-f0-9]{32}\.json)$/;
+const ALLOWED_PATH_RE = /^(users\/[a-f0-9]{32}\.json|system\/usernames\/[a-z0-9_]{3,32}\.json|system\/tube\.json|system\/tunnel\.json|uploads\/[a-f0-9]{32}\/manifest\.json|shares\/[a-f0-9]{64}\.json|upload-links\/[a-f0-9]{64}\.json|tokens\/[a-f0-9]{32}\.json|pipsdb\/[a-f0-9]{32}\.json|devices\/[a-f0-9]{32}\.json|follows\/[a-f0-9]{32}\.json|inbox\/[a-f0-9]{32}\.json|notifications\/[a-f0-9]{32}\.json|messages\/[a-f0-9]{32}\.[a-f0-9]{32}\.json|attachments\/[a-f0-9]{32}\.json)$/;
 const SHARE_HASH_RE = /^[a-f0-9]{64}$/;
 
 function userPath(userId) {
@@ -87,9 +87,15 @@ function tubePath() {
   return 'system/tube.json';
 }
 
+// The single Pips Tunnel document: accounts, reserved names, traffic counters
+// and request logs, in one JSON file.
+function tunnelDbPath() {
+  return 'system/tunnel.json';
+}
+
 function assertAllowedPath(path) {
   if (!ALLOWED_PATH_RE.test(path)) throw new Error('path not allowed');
   return path;
 }
 
-module.exports = { USERNAME_RE, userPath, usernamePath, manifestPath, sharePath, uploadLinkPath, tokensPath, pipsDbPath, devicesPath, followsPath, inboxPath, notificationsPath, messagesPath, attachmentsPath, tubePath, assertAllowedPath };
+module.exports = { USERNAME_RE, userPath, usernamePath, manifestPath, sharePath, uploadLinkPath, tokensPath, pipsDbPath, devicesPath, followsPath, inboxPath, notificationsPath, messagesPath, attachmentsPath, tubePath, tunnelDbPath, assertAllowedPath };

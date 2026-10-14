@@ -28,7 +28,8 @@ const { PipsDb } = require('./pipsdb');
 const { Devices } = require('./devices');
 const { Social } = require('./social');
 const appRelease = require('./app-release');
-const { Tunnels } = require('./tunnel');
+const { Tunnels, randomName } = require('./tunnel');
+const { TunnelStore } = require('./tunnel-store');
 const { clientBundle } = require('./tunnel-package');
 const { installScript } = require('./tunnel-install');
 const pages = require('./pages');
@@ -1643,7 +1644,41 @@ async function apiChatCancel(ctx) {
 
 async function apiTunnelRegister(ctx) {
   const body = await readJsonBody(ctx);
-  ok(ctx, 201, ctx.tunnel.register(body.name));
+  await ctx.tunnel.store.load();
+  // Refresh the reserved-name map from the persisted store (a cheap Map
+  // rebuild) so claims survive restarts and are correct on the first register.
+  ctx.tunnel.claims = ctx.tunnel.store.claims();
+  let account = null;
+  const token = bearerToken(ctx.req);
+  if (token) {
+    account = await ctx.tunnel.store.verify(token);
+    if (!account) throw new AppError(401, 'INVALID_TOKEN', 'Unknown or invalid tunnel token. Create one with: curl -X POST <server>/api/tunnel/account');
+  }
+  let out;
+  if (account && body.name !== undefined && body.name !== null && String(body.name) !== '') {
+    out = ctx.tunnel.register(String(body.name), { accountId: account.id });
+  } else if (account) {
+    out = ctx.tunnel.register(randomName(), {});
+  } else {
+    // Anonymous callers get a fresh random name; their requested name is ignored.
+    let lastErr = null;
+    for (let i = 0; i < 5; i++) {
+      try {
+        out = ctx.tunnel.register(randomName(), {});
+        lastErr = null;
+        break;
+      } catch (err) {
+        if (err && err.code === 'NAME_RESERVED') {
+          lastErr = err;
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (lastErr) throw lastErr;
+  }
+  ctx.tunnel.store.noteRegister(out.name, account ? account.id : null);
+  ok(ctx, 201, { name: out.name, clientId: out.clientId, reserved: out.reserved, account: account ? account.tokenMask : null });
 }
 
 async function apiTunnelPoll(ctx) {
@@ -1672,7 +1707,9 @@ async function apiTunnelRespond(ctx) {
 
 async function apiTunnelClose(ctx) {
   const body = await readJsonBody(ctx);
-  ok(ctx, 200, { closed: ctx.tunnel.close(String(body.name || '')) });
+  const closed = ctx.tunnel.close(String(body.name || ''));
+  if (closed) ctx.tunnel.store.noteClose(String(body.name || ''));
+  ok(ctx, 200, { closed });
 }
 
 async function apiTunnelList(ctx) {
@@ -1709,6 +1746,17 @@ function publicBase(req) {
   const local = /^(localhost|\[::1\]|127\.0\.0\.1)(:\d+)?$/i.test(host);
   const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || (local ? 'http' : 'https');
   return `${proto}://${host}`;
+}
+
+// The tunnel token from an Authorization: Bearer header (CLI clients).
+function bearerToken(req) {
+  const h = String(req.headers.authorization || '');
+  return h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+}
+
+// Browser visitors get friendly tunnel error pages; API clients get JSON.
+function wantsHtml(req) {
+  return String(req.headers.accept || '').includes('text/html');
 }
 
 // One-line installer for the tunnel client, consumed as
@@ -1749,13 +1797,41 @@ async function apiTunnelProxy(ctx) {
     if (TUNNEL_STRIPPED_HEADERS.has(lk)) continue;
     headers[lk] = Array.isArray(v) ? v.join(', ') : String(v);
   }
-  const out = await ctx.tunnel.forward({
-    name,
-    method,
-    path: (ctx.params.rest || '/') + ctx.url.search,
-    headers,
-    body: raw.toString('base64'),
-  });
+  if (ctx.tunnel.store) await ctx.tunnel.store.load();
+  const path = (ctx.params.rest || '/') + ctx.url.search;
+  const t0 = Date.now();
+  let out;
+  try {
+    out = await ctx.tunnel.forward({ name, method, path, headers, body: raw.toString('base64') });
+  } catch (err) {
+    // Browser visitors get a friendly (self-retrying) page; other clients get JSON.
+    const codes = ['TUNNEL_OFFLINE', 'TUNNEL_TIMEOUT', 'TUNNEL_BUSY', 'TUNNEL_LIMIT'];
+    if (err instanceof AppError && codes.includes(err.code)) {
+      if (wantsHtml(ctx.req)) {
+        const kindMap = { TUNNEL_OFFLINE: 'offline', TUNNEL_TIMEOUT: 'slow', TUNNEL_BUSY: 'busy', TUNNEL_LIMIT: 'busy' };
+        return sendHtml(ctx.res, err.status, pages.tunnelErrorPage({ kind: kindMap[err.code], name, base: publicBase(ctx.req) }), {
+          'Content-Security-Policy': INSTALL_PAGE_CSP,
+        });
+      }
+      return sendJson(ctx.res, err.status, { success: false, error: { code: err.code, message: err.message } });
+    }
+    throw err;
+  }
+  const bodyBuf = Buffer.from(String(out.body || ''), 'base64');
+  const status = Math.min(599, Math.max(100, Math.round(Number(out.status) || 200)));
+  const noteTraffic = () => {
+    if (ctx.tunnel.store) {
+      ctx.tunnel.store.noteTraffic(name, { method, path, status, bytes: bodyBuf.length, ms: Date.now() - t0 });
+    }
+  };
+  // The tunnel is connected but the local app refused or timed out (the client
+  // marks that with x-tunnel-error): browsers get an explanation, not a bare 502.
+  if (out.status === 502 && /local-unreachable/i.test(String((out.headers || {})['x-tunnel-error'] || '')) && wantsHtml(ctx.req)) {
+    noteTraffic();
+    return sendHtml(ctx.res, 502, pages.tunnelErrorPage({ kind: 'down', name, base: publicBase(ctx.req) }), {
+      'Content-Security-Policy': INSTALL_PAGE_CSP,
+    });
+  }
   const resHeaders = {};
   for (const [k, v] of Object.entries(out.headers || {})) {
     const lk = String(k).toLowerCase();
@@ -1763,8 +1839,57 @@ async function apiTunnelProxy(ctx) {
     if (lk === 'set-cookie') resHeaders['Set-Cookie'] = Array.isArray(v) ? v : [v];
     else resHeaders[k] = v;
   }
-  const status = Math.min(599, Math.max(100, Math.round(Number(out.status) || 200)));
-  send(ctx.res, status, resHeaders, Buffer.from(String(out.body || ''), 'base64'));
+  noteTraffic();
+  send(ctx.res, status, resHeaders, bodyBuf);
+}
+
+// ---- Tunnel accounts, dashboard and stats (v2)
+
+async function apiTunnelAccount(ctx) {
+  const body = await readJsonBody(ctx);
+  const { account, token } = await ctx.tunnel.store.createAccount(body && body.label);
+  ok(ctx, 201, { accountId: account.id, token, label: account.label, tokenMask: account.tokenMask });
+}
+
+async function apiTunnelWhoami(ctx) {
+  const account = await ctx.tunnel.store.verify(bearerToken(ctx.req));
+  if (!account) throw new AppError(401, 'INVALID_TOKEN', 'Send Authorization: Bearer <tunnel token>.');
+  ok(ctx, 200, { account: { id: account.id, label: account.label, tokenMask: account.tokenMask, createdAt: account.createdAt }, names: ctx.tunnel.store.namesFor(account.id) });
+}
+
+async function apiTunnelStats(ctx) {
+  if (ctx.tunnel.store) await ctx.tunnel.store.load();
+  const s = ctx.tunnel.stats();
+  ok(ctx, 200, {
+    ...s,
+    accounts: ctx.tunnel.store ? ctx.tunnel.store.doc.accounts.length : 0,
+    names: ctx.tunnel.store ? Object.keys(ctx.tunnel.store.doc.names).length : 0,
+    uptimeMs: Math.round(process.uptime() * 1000),
+  });
+}
+
+// Visitor-facing traffic inspector. GET ?token=... or POST the login form.
+async function pageTunnelDashboard(ctx) {
+  let token = '';
+  if (ctx.req.method === 'POST') {
+    // The login form submits urlencoded (readForm accepts JSON bodies too).
+    const body = await readForm(ctx);
+    token = String(body.token || '');
+  } else {
+    token = ctx.url.searchParams.get('token') || '';
+  }
+  const account = token ? await ctx.tunnel.store.verify(token) : null;
+  if (!account) {
+    const err = token ? 'That token was not recognized. Check it and try again.' : '';
+    return sendHtml(ctx.res, token ? 401 : 200, pages.tunnelLoginPage({ error: err, base: publicBase(ctx.req) }), {
+      'Content-Security-Policy': INSTALL_PAGE_CSP,
+    });
+  }
+  const live = ctx.tunnel.list();
+  const names = ctx.tunnel.store.namesFor(account.id).map((n) => ({ ...n, live: live.some((t) => t.name === n.name) }));
+  sendHtml(ctx.res, 200, pages.tunnelDashboardPage({ account, names, tunnels: live, base: publicBase(ctx.req) }), {
+    'Content-Security-Policy': INSTALL_PAGE_CSP,
+  });
 }
 
 const FILE_ID = '([a-f0-9]{32})';
@@ -1908,6 +2033,11 @@ const ROUTES = [
   { method: 'POST', path: '/api/tunnel/register', handler: apiTunnelRegister, csrfExempt: true },
   { method: 'POST', path: '/api/tunnel/respond', handler: apiTunnelRespond, csrfExempt: true },
   { method: 'POST', path: '/api/tunnel/close', handler: apiTunnelClose, csrfExempt: true },
+  { method: 'POST', path: '/api/tunnel/account', handler: apiTunnelAccount, csrfExempt: true },
+  { method: 'GET', path: '/api/tunnel/whoami', handler: apiTunnelWhoami },
+  { method: 'GET', path: '/api/tunnel/stats', handler: apiTunnelStats },
+  { method: 'GET', path: '/tun/dashboard', handler: pageTunnelDashboard },
+  { method: 'POST', path: '/tun/dashboard', handler: pageTunnelDashboard, csrfExempt: true },
   { method: 'GET', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'] },
   { method: 'POST', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'], csrfExempt: true },
   { method: 'PUT', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'], csrfExempt: true },
@@ -2018,7 +2148,13 @@ function createServer(options = {}) {
     waitMs: positiveInt(env.TUNNEL_WAIT_MS, 30000),
     pollWaitMs: positiveInt(env.TUNNEL_POLL_WAIT_MS, 20000),
     ttlMs: positiveInt(env.TUNNEL_TTL_MS, 90000),
+    maxTunnels: positiveInt(env.TUNNEL_MAX_TUNNELS, 200),
+    maxQueue: positiveInt(env.TUNNEL_MAX_QUEUE, 64),
   });
+  // Tunnel accounts, reserved names and traffic logs persist as one JSON doc.
+  // The store loads lazily (memoized); tunnel handlers await store.load().
+  const tunnelStore = new TunnelStore({ storage: auth.storage, saveDelayMs: positiveInt(env.TUNNEL_SAVE_MS, 5000) });
+  tunnels.store = tunnelStore;
   const server = http.createServer((req, res) => {
     dispatch(req, res, auth, corsOrigins, modelChat, tunnels).catch((err) => {
       console.error(`Unhandled error: ${err && err.name}`);
@@ -2033,6 +2169,8 @@ function createServer(options = {}) {
   server.chatJobs = modelChat.jobs;
   // Tests use this to seed tunnels without going through the HTTP API.
   server.tunnels = tunnels;
+  // Tests use this to inspect/flush the persisted tunnel document.
+  server.tunnelStore = tunnelStore;
   if (modelChat.chat.enabled) {
     console.log('Model chat: enabled. Starting the llama.cpp runtime in the background.');
     modelChat.chat.start();
