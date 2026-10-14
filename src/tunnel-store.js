@@ -6,10 +6,13 @@
 // abstraction with sha tracking and a bounded ConflictError retry.
 
 const crypto = require('node:crypto');
-const { ConflictError } = require('./errors');
+const { AppError, ConflictError } = require('./errors');
 const { tunnelDbPath } = require('./paths');
 
 const TOKEN_PREFIX = 'tunt_';
+// Same shape as src/tunnel.js NAME_RE (kept local so the store has no import cycle):
+// 1-32 chars, a-z 0-9 "-" "_", starting with a letter or digit.
+const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 const LOG_LIMIT = 50; // recent request log rows kept per tunnel name
 const UPDATE_ATTEMPTS = 4;
 const ID_RE = /^[a-f0-9]{24}$/;
@@ -60,7 +63,10 @@ class TunnelStore {
     return m;
   }
 
-  async createAccount(label) {
+  // Tunnel accounts may be anonymous (the CLI's POST /api/tunnel/account) or
+  // owned by a signed-in site user (the /tunnel manager). Ownership is what
+  // accountsForUser/assertOwned/revokeAccount are keyed on.
+  async createAccount(label, { userId = null, username = null } = {}) {
     await this.load();
     const account = {
       id: randomId(),
@@ -68,6 +74,8 @@ class TunnelStore {
       tokenMask: '',
       label: String(label || '').trim().slice(0, 64),
       createdAt: this.now(),
+      userId: userId ? String(userId) : null,
+      username: username ? String(username) : null,
     };
     const token = TOKEN_PREFIX + crypto.randomBytes(20).toString('hex');
     account.tokenHash = sha256(token);
@@ -78,9 +86,85 @@ class TunnelStore {
       tokenMask: account.tokenMask,
       label: account.label,
       createdAt: account.createdAt,
+      userId: account.userId,
+      username: account.username,
     });
     this.markDirty();
     return { account, token };
+  }
+
+  // Every tunnel token a site user created, with a count of names it holds.
+  // Masks only - the full token was shown once when the token was created.
+  accountsForUser(userId) {
+    return this.doc.accounts
+      .filter((a) => a.userId && a.userId === userId)
+      .map((a) => ({
+        id: a.id,
+        label: a.label,
+        tokenMask: a.tokenMask,
+        createdAt: a.createdAt,
+        names: Object.values(this.doc.names).filter((n) => n.accountId === a.id).length,
+      }));
+  }
+
+  // Returns the account when it exists and belongs to this site user; any
+  // other case is the same not-found error (no existence leak).
+  assertOwned(accountId, userId) {
+    const account = this.accountById(accountId);
+    if (!account || !userId || account.userId !== userId) {
+      throw new AppError(404, 'TUNNEL_TOKEN_NOT_FOUND', 'No such tunnel token.');
+    }
+    return account;
+  }
+
+  // Revoke one of the user's tunnel tokens: release every name it had claimed
+  // (so others can take them) and drop the account. Returns the released names.
+  async revokeAccount(accountId, userId) {
+    await this.load();
+    const account = this.assertOwned(accountId, userId);
+    const released = [];
+    for (const [name, rec] of Object.entries(this.doc.names)) {
+      if (rec.accountId === account.id) {
+        rec.accountId = null;
+        released.push(name);
+      }
+    }
+    this.doc.accounts = this.doc.accounts.filter((a) => a.id !== account.id);
+    this.markDirty();
+    return released;
+  }
+
+  // Reserve a stable name for a tunnel account. Valid names only; a name held
+  // by a different account is taken, a free (or re-claimed by its owner) name
+  // is (re)attached. The account must already be ownership-checked.
+  claimName(rawName, accountId) {
+    const name = String(rawName || '').trim().toLowerCase();
+    if (!NAME_RE.test(name)) {
+      throw new AppError(400, 'INVALID_NAME', 'App name must be 1-32 characters: a-z, 0-9, "-" or "_", starting with a letter or digit.');
+    }
+    const existing = this.doc.names[name];
+    if (existing && existing.accountId && existing.accountId !== accountId) {
+      throw new AppError(409, 'NAME_TAKEN', 'That tunnel name is already reserved.');
+    }
+    const record = this.ensureName(name, accountId);
+    this.markDirty();
+    return { name, ...record };
+  }
+
+  // Give a reserved name back: the record survives (traffic history stays)
+  // but becomes free for anyone to claim again.
+  releaseName(rawName, accountId) {
+    const name = String(rawName || '').trim().toLowerCase();
+    const rec = this.doc.names[name];
+    if (!rec || !rec.accountId) {
+      throw new AppError(404, 'NAME_NOT_FOUND', 'No reserved tunnel name goes by that name.');
+    }
+    if (rec.accountId !== accountId) {
+      throw new AppError(403, 'NAME_NOT_YOURS', 'That tunnel name belongs to a different tunnel token.');
+    }
+    rec.accountId = null;
+    this.markDirty();
+    return { name, released: true };
   }
 
   async verify(token) {

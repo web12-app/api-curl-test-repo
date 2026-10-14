@@ -1868,6 +1868,85 @@ async function apiTunnelStats(ctx) {
   });
 }
 
+// ---- Tunnel tokens + reserved names for signed-in site users (the /tunnel manager)
+
+// The manager page. Same login shape as pageAppHome: signed-in users only.
+async function pageTunnelManage(ctx) {
+  requireConfigured(ctx);
+  const user = await currentUser(ctx);
+  if (!user) return redirect(ctx.res, '/login');
+  await ctx.tunnel.store.load();
+  const tokens = ctx.tunnel.store.accountsForUser(user.id);
+  const ownedIds = new Set(tokens.map((t) => t.id));
+  const masks = new Map(tokens.map((t) => [t.id, t.tokenMask]));
+  const live = ctx.tunnel.list();
+  const names = Object.entries(ctx.tunnel.store.doc.names)
+    .filter(([, rec]) => rec.accountId && ownedIds.has(rec.accountId))
+    .map(([name, rec]) => ({
+      name,
+      served: rec.served || 0,
+      bytes: rec.bytes || 0,
+      tokenMask: masks.get(rec.accountId) || '',
+      live: live.some((t) => t.name === name),
+    }));
+  sendHtml(ctx.res, 200, pages.tunnelManagePage({ user, tokens, names, error: ctx.url.searchParams.get('error') || '' }));
+}
+
+// Create a tunnel token owned by the signed-in user. The full token is in this
+// one response only - the store keeps the hash and shows the mask everywhere else.
+async function apiTunnelTokensCreate(ctx) {
+  requireConfigured(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readOptionalJson(ctx);
+  const label = body && typeof body.label === 'string' ? body.label : '';
+  const { account, token } = await ctx.tunnel.store.createAccount(label, { userId: user.id, username: user.username });
+  ok(ctx, 201, { id: account.id, token, tokenMask: account.tokenMask, label: account.label });
+}
+
+async function apiTunnelTokensList(ctx) {
+  requireConfigured(ctx);
+  const user = await requireUser(ctx);
+  await ctx.tunnel.store.load();
+  ok(ctx, 200, { tokens: ctx.tunnel.store.accountsForUser(user.id) });
+}
+
+async function apiTunnelTokensRevoke(ctx) {
+  requireConfigured(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  await ctx.tunnel.store.load();
+  const released = await ctx.tunnel.store.revokeAccount(ctx.params.id, user.id);
+  ok(ctx, 200, { revoked: true, released });
+}
+
+// Reserve a stable /tun/<name> for one of the user's tunnel tokens.
+async function apiTunnelClaim(ctx) {
+  requireConfigured(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  await ctx.tunnel.store.load();
+  const body = await readJsonBody(ctx);
+  const account = ctx.tunnel.store.assertOwned(body.accountId, user.id);
+  const record = ctx.tunnel.store.claimName(body.name, account.id);
+  ok(ctx, 201, { name: record.name, accountId: account.id, reserved: true });
+}
+
+async function apiTunnelRelease(ctx) {
+  requireConfigured(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  await ctx.tunnel.store.load();
+  const body = await readJsonBody(ctx);
+  const name = String(body.name || '');
+  const rec = ctx.tunnel.store.doc.names[name.trim().toLowerCase()];
+  const accountId = rec ? rec.accountId : null;
+  const owned = accountId && ctx.tunnel.store.accountsForUser(user.id).some((t) => t.id === accountId);
+  if (!owned) throw new AppError(404, 'NAME_NOT_FOUND', 'No reserved tunnel name goes by that name.');
+  ctx.tunnel.store.releaseName(name, accountId);
+  ok(ctx, 200, { released: true, name: name.trim().toLowerCase() });
+}
+
 // Visitor-facing traffic inspector. GET ?token=... or POST the login form.
 async function pageTunnelDashboard(ctx) {
   let token = '';
@@ -2036,6 +2115,16 @@ const ROUTES = [
   { method: 'POST', path: '/api/tunnel/account', handler: apiTunnelAccount, csrfExempt: true },
   { method: 'GET', path: '/api/tunnel/whoami', handler: apiTunnelWhoami },
   { method: 'GET', path: '/api/tunnel/stats', handler: apiTunnelStats },
+  // ---- Tunnel manager for signed-in site users: tokens + reserved names.
+  // Mutating routes are NOT csrfExempt: dispatch's same-origin check covers
+  // every non-GET (DELETE included), and the handlers additionally require the
+  // X-Requested-With: fetch header unless a Bearer sat_ token authenticates.
+  { method: 'GET', path: '/tunnel', handler: pageTunnelManage },
+  { method: 'GET', path: '/api/tunnel/tokens', handler: apiTunnelTokensList },
+  { method: 'POST', path: '/api/tunnel/tokens', handler: apiTunnelTokensCreate },
+  { method: 'DELETE', pattern: new RegExp('^/api/tunnel/tokens/([a-f0-9]{24})$'), handler: apiTunnelTokensRevoke, keys: ['id'] },
+  { method: 'POST', path: '/api/tunnel/claim', handler: apiTunnelClaim },
+  { method: 'POST', path: '/api/tunnel/release', handler: apiTunnelRelease },
   { method: 'GET', path: '/tun/dashboard', handler: pageTunnelDashboard },
   { method: 'POST', path: '/tun/dashboard', handler: pageTunnelDashboard, csrfExempt: true },
   { method: 'GET', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'] },
