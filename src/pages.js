@@ -139,6 +139,8 @@ const ICON = {
   layers: svg('<path d="m12 2 9 5-9 5-9-5 9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/>'),
   check: svg('<path d="m4 12 5 5 11-11"/>', 15),
   spark: svg('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z"/>', 15),
+  // Radio waves: the Pips Tunnel nav glyph (a beacon between the two arcs).
+  tunnel: svg('<path d="M4.9 19.1a10 10 0 0 1 0-14.2"/><path d="M8.5 15.5a5 5 0 0 1 0-7"/><path d="M19.1 4.9a10 10 0 0 1 0 14.2"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><circle cx="12" cy="12" r="1"/>'),
 };
 
 // Top menu styles for logged-in pages (Home, Explore) and any layout with a user.
@@ -278,7 +280,7 @@ function layout(title, body, user, { wide = false, extraCss = '', active = '' } 
     `<a class="nav-link${active === key ? ' active' : ''}" href="${href}">${icon}<span>${label}</span></a>`;
   const nav = user
     ? `<a class="brand" href="/home">${ICON.box}<span>File Vault</span></a>
-       <div class="nav-links">${navLink('/home', 'home', ICON.home, 'Home')}${navLink('/explore', 'explore', ICON.compass, 'Explore')}</div>
+       <div class="nav-links">${navLink('/home', 'home', ICON.home, 'Home')}${navLink('/explore', 'explore', ICON.compass, 'Explore')}${navLink('/tunnel', 'tunnel', ICON.tunnel, 'Tunnel')}</div>
        <div class="nav-right">
          <span class="user-chip" title="Signed in">${ICON.user}<span>${escapeHtml(user.username)}</span></span>
          <form method="post" action="/logout" class="inline"><button type="submit" class="nav-logout">${ICON.logout}<span>Log out</span></button></form>
@@ -784,6 +786,7 @@ function tunnelPage({ tunnels, base = '' }) {
 ~/.pips-tunnel/tun start 5000
 # → ${escBase}/tun/&lt;name&gt;  (a random name is assigned and printed)</pre>
         <p class="hint">Want a stable URL? Create a token: <b>curl -X POST ${escBase}/api/tunnel/account</b>, run <b>tun login &lt;token&gt;</b> once, then <b>tun start 5000 myname</b> keeps <b>/tun/myname</b> yours. Inspect traffic and logs at <b>${escBase}/tun/dashboard</b>. No curl? Download <b>tunnel.tar.gz</b> above and unpack it: <b>tar -xzf tunnel.tar.gz &amp;&amp; cd tunnel &amp;&amp; ./tun start 5000</b>. Windows: <b>node tun.js start 5000</b>. More: <b>tun list</b>, <b>tun close &lt;name&gt;</b>, and <b>--server &lt;url&gt;</b> to target any other host (ngrok, Cloudflare, anything in front of this app). The /tun/&lt;name&gt; prefix is stripped before your app sees the request.</p>
+        <p class="hint">Site user? <a href="${escBase}/tunnel">Create tokens &amp; reserve names in the tunnel manager &rarr;</a></p>
       </section>
 
       <section class="panel">
@@ -989,4 +992,163 @@ function tunnelDashboardPage({ account, names, tunnels, base = '' }) {
 `;
 }
 
-module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, chatPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage, appInstallPage, tunnelPage, tunnelErrorPage, tunnelLoginPage, tunnelDashboardPage };
+// ---- Tunnel manager (/tunnel): tokens + reserved names for signed-in site users ----
+
+// Extra styles on top of the layout chrome. Reuses DASHBOARD_CSS classes
+// (table.files, .badge, .hint, button.danger, .button); only the creation
+// banner and the token <code> look are new.
+const TUNNEL_MANAGE_CSS = `
+      code { background: #f6f8fa; border-radius: 4px; padding: .1rem .35rem; font-size: .92em; overflow-wrap: anywhere; }
+      select { display: block; width: 100%; padding: .4rem; margin-top: .25rem; box-sizing: border-box; }
+      .panel { border: 1px solid #d0d7de; border-radius: 8px; padding: 1rem; margin: 1rem 0; background: #fff; }
+      .panel h2 { margin-top: 0; }
+      .badge.live-badge { background: #dafbe1; color: #116329; }
+      .badge.off-badge { background: #ffebe9; color: #cf222e; }
+      .created-banner { border: 1px solid #1a7f37; background: #dafbe1; border-radius: 8px; padding: .8rem 1rem; margin: .75rem 0; }
+      .created-banner p { margin: .3rem 0; }
+      .created-banner .token { font-size: 1.02rem; font-weight: 600; }
+      .row-actions { display: flex; gap: .4rem; }
+      .foot-links { margin-top: 1.5rem; border-top: 1px solid #d0d7de; padding-top: .75rem; }`;
+
+// The one-time full-token banner. `created` comes either from the server
+// render (rare) or, after the fetch create flow, from sessionStorage.
+function tunnelCreatedBanner({ token, label }) {
+  return `<div class="created-banner" role="status">
+        <p><strong>New tunnel token${label ? ` “${escapeHtml(label)}”` : ''} created.</strong></p>
+        <p>Copy it now — it is shown only once:</p>
+        <p><code class="token">${escapeHtml(token)}</code></p>
+        <p class="hint">Use it with the CLI: <code>tun login ${escapeHtml(token)}</code></p>
+      </div>`;
+}
+
+function tunnelManagePage({ user, tokens, names, error = '', created = null }) {
+  const esc = escapeHtml;
+  const banner = created ? tunnelCreatedBanner(created) : '<div id="banner-slot"></div>';
+  const tokenRows = tokens
+    .map(
+      (t) => `<tr>
+            <td data-label="label">${t.label ? esc(t.label) : '<span class="hint">—</span>'}</td>
+            <td data-label="token"><code>${esc(t.tokenMask)}</code></td>
+            <td data-label="created">${new Date(t.createdAt).toISOString().slice(0, 10)}</td>
+            <td data-label="names">${Number(t.names) || 0}</td>
+            <td class="actions" data-label="actions"><button class="danger" data-revoke="${esc(t.id)}">Revoke</button></td>
+          </tr>`,
+    )
+    .join('\n            ');
+  const tokenTable = tokenRows
+    ? `<table class="files"><thead><tr><th>label</th><th>token</th><th>created</th><th>names</th><th></th></tr></thead><tbody>
+            ${tokenRows}
+          </tbody></table>`
+    : '<p class="hint">No tunnel tokens yet. A token lets the CLI client (<b>tun</b>) connect and hold stable names for you.</p>';
+  const nameRows = names
+    .map(
+      (n) => `<tr>
+            <td data-label="name"><a href="/tun/${esc(n.name)}">/tun/${esc(n.name)}</a></td>
+            <td data-label="status">${n.live ? '<span class="badge live-badge">LIVE</span>' : '<span class="badge off-badge">OFFLINE</span>'}</td>
+            <td data-label="served">${Number(n.served) || 0}</td>
+            <td data-label="bytes">${Number(n.bytes) || 0}</td>
+            <td data-label="token"><code>${esc(n.tokenMask)}</code></td>
+            <td class="actions" data-label="actions"><button class="danger" data-release="${esc(n.name)}">Release</button></td>
+          </tr>`,
+    )
+    .join('\n            ');
+  const nameTable = nameRows
+    ? `<table class="files"><thead><tr><th>name</th><th>status</th><th>served</th><th>bytes</th><th>token</th><th></th></tr></thead><tbody>
+            ${nameRows}
+          </tbody></table>`
+    : '<p class="hint">No reserved names yet. Reserve one below and <b>/tun/&lt;name&gt;</b> stays yours even across restarts.</p>';
+  const tokenOptions = tokens
+    .map((t) => `<option value="${esc(t.id)}">${esc(t.tokenMask)}${t.label ? ' · ' + esc(t.label) : ''}</option>`)
+    .join('\n              ');
+  const reserveForm = tokens.length
+    ? `<form id="claim-form">
+          <label>Name
+            <input name="name" required maxlength="32" pattern="[a-z0-9][a-z0-9_-]{0,31}" placeholder="mytun" autocomplete="off">
+          </label>
+          <label>Tunnel token
+            <select name="accountId">${tokenOptions}</select>
+          </label>
+          <button type="submit">Reserve name</button>
+        </form>`
+    : '<p class="hint">Create a tunnel token first — then you can reserve stable names for it.</p>';
+  const body = `<h1>Tunnels</h1>
+    <p class="hint">Stable tunnel names and CLI tokens for <strong>${esc(user.username)}</strong>.</p>
+    ${error ? `<p class="error" role="alert">${esc(error)}</p>` : ''}
+    ${banner}
+    <section class="panel">
+      <h2>Tunnel tokens</h2>
+      <p><button id="create-token">Create token</button> <label class="hint" style="display:inline">label <input id="token-label" maxlength="64" placeholder="laptop" autocomplete="off" style="display:inline;width:auto"></label></p>
+      ${tokenTable}
+    </section>
+    <section class="panel">
+      <h2>Your tunnel names</h2>
+      ${nameTable}
+    </section>
+    <section class="panel">
+      <h2>Reserve a tunnel name</h2>
+      ${reserveForm}
+    </section>
+    <p class="hint foot-links">
+      Public tunnels: <a href="/tun">/tun</a> &middot; Deep inspection: <a href="/tun/dashboard">/tun/dashboard</a><br>
+      Quickstart: <code>curl -fsSL /tunnel.sh | sh</code> then <code>tun login &lt;token&gt;</code> then <code>./tun start 5000 &lt;your-name&gt;</code>
+    </p>
+    <script>
+    (() => {
+      const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      async function api(method, url, body) {
+        const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' }, body: body === undefined ? undefined : JSON.stringify(body) });
+        let json = null;
+        try { json = await res.json(); } catch (e) { /* non-JSON error */ }
+        if (!res.ok || !json || json.success === false) {
+          throw new Error((json && json.error && json.error.message) || ('Request failed (' + res.status + ')'));
+        }
+        return json.data;
+      }
+      function bannerHtml(t) {
+        return '<div class="created-banner" role="status"><p><strong>New tunnel token' + (t.label ? ' \\u201c' + esc(t.label) + '\\u201d' : '') + ' created.</strong></p>'
+          + '<p>Copy it now \\u2014 it is shown only once:</p>'
+          + '<p><code class="token">' + esc(t.token) + '</code></p>'
+          + '<p class="hint">Use it with the CLI: <code>tun login ' + esc(t.token) + '</code></p></div>';
+      }
+      const slot = document.getElementById('banner-slot');
+      const saved = sessionStorage.getItem('tunnel-created');
+      if (saved && slot) {
+        sessionStorage.removeItem('tunnel-created');
+        try { slot.innerHTML = bannerHtml(JSON.parse(saved)); } catch (e) { /* ignore */ }
+      }
+      document.addEventListener('click', async (e) => {
+        const create = e.target.closest('#create-token');
+        const revoke = e.target.closest('button[data-revoke]');
+        const release = e.target.closest('button[data-release]');
+        try {
+          if (create) {
+            const labelInput = document.getElementById('token-label');
+            const data = await api('POST', '/api/tunnel/tokens', { label: labelInput ? labelInput.value : '' });
+            sessionStorage.setItem('tunnel-created', JSON.stringify(data));
+            location.reload();
+          } else if (revoke) {
+            await api('DELETE', '/api/tunnel/tokens/' + revoke.getAttribute('data-revoke'));
+            location.reload();
+          } else if (release) {
+            await api('POST', '/api/tunnel/release', { name: release.getAttribute('data-release') });
+            location.reload();
+          }
+        } catch (err) { alert(err.message); }
+      });
+      const claim = document.getElementById('claim-form');
+      if (claim) claim.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        try {
+          await api('POST', '/api/tunnel/claim', {
+            name: claim.elements.namedItem('name').value,
+            accountId: claim.elements.namedItem('accountId').value,
+          });
+          location.reload();
+        } catch (err) { alert(err.message); }
+      });
+    })();
+    </script>`;
+  return layout(`Tunnels - ${user.username}`, body, user, { wide: true, extraCss: DASHBOARD_CSS + TUNNEL_MANAGE_CSS, active: 'tunnel' });
+}
+
+module.exports = { escapeHtml, errorText, fmtLimit, welcomePage, appHomePage, explorePage, tubeFeedPage, tubeWatchPage, tubeChannelPage, chatPage, authForm, sharePage, uploadPage, uploadDonePage, errorPage, appInstallPage, tunnelPage, tunnelErrorPage, tunnelLoginPage, tunnelDashboardPage, tunnelManagePage };
