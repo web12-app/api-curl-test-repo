@@ -1741,12 +1741,19 @@ async function pageTunnelHome(ctx) {
 // The base URL as the visitor sees it: the installer and the quickstart on
 // /tun are pinned to whatever host the request actually reached, so the same
 // responses stay correct behind ngrok, Cloudflare, or localhost.
-function publicBase(req) {
+function hostProto(req) {
   const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
-  if (!host) return '';
   const local = /^(localhost|\[::1\]|127\.0\.0\.1)(:\d+)?$/i.test(host);
   const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || (local ? 'http' : 'https');
-  return `${proto}://${host}`;
+  return { host, proto };
+}
+
+// The base URL as the visitor sees it: the installer and the quickstart on
+// /tun are pinned to whatever host the request actually reached, so the same
+// responses stay correct behind ngrok, Cloudflare, or localhost.
+function publicBase(req) {
+  const { host, proto } = hostProto(req);
+  return host ? `${proto}://${host}` : '';
 }
 
 // The tunnel token from an Authorization: Bearer header (CLI clients).
@@ -1790,26 +1797,59 @@ function readRawBody(req, limit) {
 // Reverse proxy: /tun/<name>/... → the connected client → its localhost app.
 async function apiTunnelProxy(ctx) {
   const name = ctx.params.name;
-  const method = ctx.req.method === 'HEAD' ? 'GET' : ctx.req.method;
+  // WebSocket honesty: the tunnel forwards plain HTTP only. An Upgrade header
+  // never reaches the local app — it is refused here with a clear 501 instead
+  // of silently degrading into a normal GET.
+  if (ctx.req.headers.upgrade !== undefined) {
+    if (wantsHtml(ctx.req)) {
+      return sendHtml(ctx.res, 501, pages.tunnelErrorPage({ kind: 'websocket', name, base: publicBase(ctx.req) }), {
+        'Content-Security-Policy': INSTALL_PAGE_CSP,
+      });
+    }
+    return sendJson(ctx.res, 501, { success: false, error: { code: 'WEBSOCKET_UNSUPPORTED', message: 'WebSocket forwarding is not supported.' } });
+  }
+  // HEAD is forwarded as HEAD (no hidden GET behind it); the visitor reply at
+  // the bottom ships that response's headers only.
+  const method = ctx.req.method;
   const raw = ['GET', 'HEAD'].includes(method) ? Buffer.alloc(0) : await readRawBody(ctx.req, TUNNEL_PROXY_BODY_LIMIT);
+  // Path hardening: refuse paths that are too long or carry control characters
+  // (raw or percent-decoded) before anything is queued for the tunnel client.
+  // Handled here (not via throw) so non-browser clients get JSON on /tun paths.
+  const path = String(ctx.params.rest || '/') + String(ctx.url.search || '');
+  const decoded = (() => { try { return decodeURIComponent(path); } catch { return path; } })();
+  const badPath = (message) => (wantsHtml(ctx.req)
+    ? sendHtml(ctx.res, 400, pages.errorPage(400, message))
+    : sendJson(ctx.res, 400, { success: false, error: { code: 'INVALID_PATH', message } }));
+  if (path.length > 2048) return badPath('The path is too long (2048 characters max).');
+  if (/[\x00-\x1f\x7f]/.test(path) || /[\x00-\x1f\x7f]/.test(decoded)) {
+    return badPath('The path contains control characters.');
+  }
+  // Header hygiene: the visitor is not trusted. Whatever it claims about the
+  // proxy chain (x-forwarded-*) or about the tunnel itself (x-tunnel-* — the
+  // client's error marker included) is dropped; a small trusted set is built
+  // below from the socket address and the same host/proto rules publicBase() uses.
   const headers = {};
   for (const [k, v] of Object.entries(ctx.req.headers)) {
     const lk = k.toLowerCase();
     if (TUNNEL_STRIPPED_HEADERS.has(lk)) continue;
+    if (lk.startsWith('x-forwarded-') || lk.startsWith('x-tunnel-')) continue;
     headers[lk] = Array.isArray(v) ? v.join(', ') : String(v);
   }
+  headers['x-forwarded-for'] = clientIp(ctx.req, ctx.auth);
+  const { host, proto } = hostProto(ctx.req);
+  headers['x-forwarded-host'] = host;
+  headers['x-forwarded-proto'] = proto;
   if (ctx.tunnel.store) await ctx.tunnel.store.load();
-  const path = (ctx.params.rest || '/') + ctx.url.search;
   const t0 = Date.now();
   let out;
   try {
     out = await ctx.tunnel.forward({ name, method, path, headers, body: raw.toString('base64') });
   } catch (err) {
     // Browser visitors get a friendly (self-retrying) page; other clients get JSON.
-    const codes = ['TUNNEL_OFFLINE', 'TUNNEL_TIMEOUT', 'TUNNEL_BUSY', 'TUNNEL_LIMIT'];
+    const codes = ['TUNNEL_OFFLINE', 'TUNNEL_UNAVAILABLE', 'TUNNEL_TIMEOUT', 'TUNNEL_BUSY', 'TUNNEL_LIMIT'];
     if (err instanceof AppError && codes.includes(err.code)) {
       if (wantsHtml(ctx.req)) {
-        const kindMap = { TUNNEL_OFFLINE: 'offline', TUNNEL_TIMEOUT: 'slow', TUNNEL_BUSY: 'busy', TUNNEL_LIMIT: 'busy' };
+        const kindMap = { TUNNEL_OFFLINE: 'offline', TUNNEL_UNAVAILABLE: 'offline', TUNNEL_TIMEOUT: 'slow', TUNNEL_BUSY: 'busy', TUNNEL_LIMIT: 'busy' };
         return sendHtml(ctx.res, err.status, pages.tunnelErrorPage({ kind: kindMap[err.code], name, base: publicBase(ctx.req) }), {
           'Content-Security-Policy': INSTALL_PAGE_CSP,
         });
@@ -1841,7 +1881,8 @@ async function apiTunnelProxy(ctx) {
     else resHeaders[k] = v;
   }
   noteTraffic();
-  send(ctx.res, status, resHeaders, bodyBuf);
+  // HEAD visitors asked for headers only — strip any body the client sent back.
+  send(ctx.res, status, resHeaders, method === 'HEAD' ? Buffer.alloc(0) : bodyBuf);
 }
 
 // ---- Tunnel accounts, dashboard and stats (v2)
@@ -2168,6 +2209,9 @@ const ROUTES = [
   { method: 'PUT', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'], csrfExempt: true },
   { method: 'PATCH', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'], csrfExempt: true },
   { method: 'DELETE', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'], csrfExempt: true },
+  // OPTIONS is proxied like POST (the local app owns its OPTIONS answer);
+  // csrfExempt so cross-origin preflights are not refused outright.
+  { method: 'OPTIONS', pattern: new RegExp(TUNNEL_PROXY_PATTERN), handler: apiTunnelProxy, keys: ['name', 'rest'], csrfExempt: true },
 ];
 
 // Returns every route whose path matches, with any path parameters.
@@ -2286,6 +2330,14 @@ function createServer(options = {}) {
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end();
     });
+  });
+  // A complete WebSocket handshake (Connection: upgrade + Upgrade header) never
+  // reaches the route table: Node raises an 'upgrade' event, and with no
+  // listener it silently destroys the socket. Answer it honestly instead —
+  // nothing here forwards WebSockets.
+  server.on('upgrade', (req, socket) => {
+    const body = JSON.stringify({ success: false, error: { code: 'WEBSOCKET_UNSUPPORTED', message: 'WebSocket forwarding is not supported.' } });
+    socket.end(`HTTP/1.1 501 Not Implemented\r\nConnection: close\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
   });
   // Tests use this to run the cleanup sweep directly. Nothing in the app reads it.
   server.fileServices = auth.files;

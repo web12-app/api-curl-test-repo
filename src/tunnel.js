@@ -50,7 +50,10 @@ class Tunnels {
     const now = this.now();
     for (const [name, t] of this.map) {
       if (now - t.lastSeen > this.ttlMs) {
-        this.drop(name, new AppError(504, 'TUNNEL_TIMEOUT', 'The tunnel app went away.'));
+        // TTL death means the client stopped talking to us: a 502 (the thing
+        // behind the URL is unreachable), not a 504 (which stays reserved for
+        // the per-request wait in forward() below).
+        this.drop(name, new AppError(502, 'TUNNEL_UNAVAILABLE', 'The tunnel client disconnected.'));
       }
     }
     for (const t of this.map.values()) {
@@ -195,11 +198,14 @@ class Tunnels {
   // One number per counter, summed over every connected tunnel.
   stats() {
     this.sweep();
-    const totals = { tunnels: this.map.size, pending: 0, served: 0, answered: 0 };
+    const totals = { tunnels: this.map.size, pending: 0, served: 0, answered: 0, activeRequests: 0, protected: 0 };
     for (const t of this.map.values()) {
       totals.pending += t.queue.length;
       totals.served += t.served;
       totals.answered += t.answered;
+      // Requests currently waiting for the client's answer (in-flight, not just
+      // queued). `protected` is a placeholder for per-tunnel protection flags.
+      totals.activeRequests += t.waiters.size;
     }
     return totals;
   }

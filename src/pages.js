@@ -852,6 +852,12 @@ function tunnelErrorPage({ kind, name, base = '' }) {
       hint: 'Wait a moment and reload — the queue drains as the local app answers.',
       refresh: false,
     },
+    websocket: {
+      title: 'WebSocket not supported',
+      body: 'WebSocket forwarding is not supported.',
+      hint: `The tunnel <b>/tun/${escName}</b> forwards plain HTTP requests only.`,
+      refresh: false,
+    },
   };
   const v = variants[kind] || variants.offline;
   return `<!doctype html>
