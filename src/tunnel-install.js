@@ -63,8 +63,15 @@ case ":$PATH:" in
 esac
 say ""
 say "Publish a local app (example):"
-say "  $DEST/tun start 5000 test"
-say "then open  $SERVER/tun/test"
+say "  $DEST/tun start 5000"
+say "A random tunnel name is assigned and the $SERVER/tun/... URL is printed."
+say ""
+say "Want a stable name? Create a token, log in once, then name it:"
+say "  curl -X POST $SERVER/api/tunnel/account   # prints a tunt_... token"
+say "  $DEST/tun login <token>"
+say "  $DEST/tun start 5000 myname               # keeps /tun/myname yours"
+say ""
+say "Inspect traffic and logs: $SERVER/tun/dashboard"
 `;
 }
 

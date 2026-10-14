@@ -3,14 +3,22 @@
 
 // tun — the Pips tunnel client. Publishes a localhost app on the server's
 // public URL:  tun start 5000 test  →  https://<server>/tun/test
+// Anonymous runs get a random name; `tun login <token>` (from
+// curl -X POST <server>/api/tunnel/account) reserves stable names.
 //
 // Zero dependencies. Needs Node 18+ (global fetch). The client registers an
 // app name, long-polls the server for forwarded HTTP requests, calls
 // http://localhost:<port>, and posts each response back. Traffic flows only
 // while this process runs.
 
+const os = require('node:os');
+const fs = require('node:fs');
+const path = require('node:path');
+
 const DEFAULT_SERVER = process.env.TUN_SERVER || 'https://precision-pledge-fled.ngrok-free.dev';
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const TUNNEL_HOME = process.env.TUNNEL_HOME || path.join(os.homedir(), '.pips-tunnel');
+const TOKEN_FILE = path.join(TUNNEL_HOME, 'token');
 
 // Hop-by-hop and framing headers the tunnel handles itself; neither the
 // request to localhost nor the response back to the server carries them.
@@ -31,10 +39,13 @@ function pickHeaders(headers) {
   return out;
 }
 
-async function api(server, path, body) {
+async function api(server, path, body, token) {
+  const headers = { 'ngrok-skip-browser-warning': '1' };
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(server.replace(/\/+$/, '') + path, {
     method: body === undefined ? 'GET' : 'POST',
-    headers: { 'ngrok-skip-browser-warning': '1', 'Content-Type': 'application/json' },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(45000),
   });
@@ -42,12 +53,25 @@ async function api(server, path, body) {
   return { status: res.status, json };
 }
 
+// The tunnel token, if the user ran `tun login` (or set TUN_TOKEN).
+function storedToken() {
+  if (process.env.TUN_TOKEN) return String(process.env.TUN_TOKEN);
+  try {
+    return fs.readFileSync(TOKEN_FILE, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
 function usage(message) {
   if (message) console.error(`\n  ${message}\n`);
   console.log(`tun — publish a localhost app on the Pips server
 
   tun start <port> <app-name>    publish http://localhost:<port> at /tun/<app-name>
-                                 (name first also works: tun start test 5000)
+                                 (name first also works: tun start test 5000;
+                                 omit the name and the server assigns one)
+  tun login <token>              remember a tunt_… token so named tunnels
+                                 stay reserved for your account
   tun list                       show tunnels connected to the server
   tun close <app-name>           close a tunnel from here
   tun --server <url> ...         use another server (default: $TUN_SERVER)
@@ -55,8 +79,8 @@ function usage(message) {
 
 example:
   tar -xzf tunnel.tar.gz && cd tunnel
-  ./tun start 5000 test
-  open https://precision-pledge-fled.ngrok-free.dev/tun/test`);
+  ./tun start 5000               # random name, the /tun/... URL is printed
+  ./tun start 5000 test          # stable name (after tun login <token>)`);
   process.exit(message ? 1 : 0);
 }
 
@@ -74,15 +98,20 @@ function parseArgs(argv) {
 }
 
 async function start(server, port, name) {
-  const reg = await api(server, '/api/tunnel/register', { name });
+  const reg = await api(server, '/api/tunnel/register', name ? { name } : {}, storedToken());
   if (reg.status !== 201 || !reg.json || reg.json.success !== true) {
     const msg = (reg.json && reg.json.error && reg.json.error.message) || `HTTP ${reg.status}`;
-    console.error(`  could not register "${name}" on ${server}\n  ${msg}`);
+    console.error(`  could not register "${name || '(random name)'}" on ${server}\n  ${msg}`);
     process.exit(1);
   }
   const clientId = reg.json.data.clientId;
+  // The server may assign a random name (anonymous tunnels get one): always
+  // trust the name from the register response for the URL, polling and close.
+  if (reg.json.data.name && String(reg.json.data.name) !== name) {
+    name = String(reg.json.data.name);
+  }
   const url = `${server.replace(/\/+$/, '')}/tun/${name}`;
-  console.log(`\n  tunnel   ${url}\n  local    http://localhost:${port}\n  ready    press Ctrl+C to stop\n`);
+  console.log(`\n  tunnel   ${url}${reg.json.data.reserved ? '  (reserved)' : ''}\n  local    http://localhost:${port}\n  ready    press Ctrl+C to stop\n`);
   let closing = false;
   const stop = async () => {
     if (closing) process.exit(0);
@@ -178,6 +207,26 @@ async function close(server, name) {
   console.log(ok ? `  tunnel "${name}" closed.` : `  no tunnel named "${name}" is connected.`);
 }
 
+// Validate a tunnel token against the server and store it for future runs.
+async function login(server, token) {
+  const res = await fetch(server.replace(/\/+$/, '') + '/api/tunnel/whoami', {
+    headers: { 'ngrok-skip-browser-warning': '1', Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(45000),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (res.status !== 200 || !json || json.success !== true) {
+    const msg = (json && json.error && json.error.message) || `HTTP ${res.status}`;
+    console.error(`  that token was not accepted by ${server}\n  ${msg}`);
+    process.exit(1);
+  }
+  fs.mkdirSync(TUNNEL_HOME, { recursive: true });
+  fs.writeFileSync(TOKEN_FILE, `${token}\n`, { mode: 0o600 });
+  const who = json.data.account || {};
+  console.log(`  logged in as ${who.label || 'tunnel account'} (${who.tokenMask || 'tunt_…'})`);
+  console.log(`  token stored in ${TOKEN_FILE}`);
+  console.log(`  dashboard: ${server.replace(/\/+$/, '')}/tun/dashboard`);
+}
+
 async function main() {
   const { server, positional } = parseArgs(process.argv.slice(2));
   const cmd = positional[0];
@@ -190,8 +239,11 @@ async function main() {
     if (!/^\d+$/.test(rawPort)) usage('start needs a port (1-65535): tun start 5000 test');
     const port = Number(rawPort);
     if (port < 1 || port > 65535) usage('port must be 1-65535.');
-    if (!NAME_RE.test(name)) usage('app name must be 1-32 chars (a-z 0-9 - _), e.g. test');
+    if (name && !NAME_RE.test(name)) usage('app name must be 1-32 chars (a-z 0-9 - _), e.g. test');
     await start(server, port, name);
+  } else if (cmd === 'login') {
+    if (!positional[1]) usage('login needs a token (create one: curl -X POST <server>/api/tunnel/account)');
+    await login(server, positional[1].trim());
   } else if (cmd === 'list') {
     await list(server);
   } else if (cmd === 'close') {

@@ -27,9 +27,16 @@ const TUN_JS = path.join(__dirname, '..', 'tunnel-client', 'tun.js');
 const JSONH = { 'Content-Type': 'application/json' };
 const runSh = promisify(execFile); // async: the in-process test server must serve curl during the installer run
 
-async function register(base, name) {
-  const res = await fetch(`${base}/api/tunnel/register`, { method: 'POST', headers: JSONH, body: JSON.stringify({ name }) });
+async function register(base, name, token) {
+  const headers = token ? { ...JSONH, Authorization: `Bearer ${token}` } : JSONH;
+  const res = await fetch(`${base}/api/tunnel/register`, { method: 'POST', headers, body: JSON.stringify({ name }) });
   return { status: res.status, json: await res.json() };
+}
+
+async function createAccount(base, label) {
+  const res = await fetch(`${base}/api/tunnel/account`, { method: 'POST', headers: JSONH, body: JSON.stringify({ label: label || '' }) });
+  const json = await res.json();
+  return { status: res.status, json, token: json.data && json.data.token };
 }
 
 // A tiny upstream app: echoes method, path and body back as JSON.
@@ -81,7 +88,7 @@ describe('tunnel.tar.gz download', () => {
       const tunSh = fs.readFileSync(path.join(dir, 'tunnel', 'tun'), 'utf8');
       assert.match(tunJs, /api\/tunnel\/register/);
       assert.match(tunJs, /precision-pledge-fled\.ngrok-free\.dev/, 'default server baked in');
-      assert.match(readme, /tun start 5000 test/);
+      assert.match(readme, /tun start 5000/);
       assert.match(tunSh, /tun\.js/);
       fs.rmSync(dir, { recursive: true, force: true });
     } finally {
@@ -107,13 +114,14 @@ describe('/tun landing page', () => {
   test('renders quickstart and live tunnels', async () => {
     const app = await startServer({ env: FAST_ENV });
     try {
-      await register(app.base, 'alpha');
+      const reg = await register(app.base, 'alpha');
+      const name = reg.json.data.name;
       const res = await fetch(`${app.base}/tun`);
       assert.equal(res.status, 200);
       const html = await res.text();
       assert.match(html, /tunnel\.tar\.gz/);
-      assert.match(html, /tun start 5000 test/);
-      assert.match(html, /\/tun\/alpha/);
+      assert.match(html, /tun start 5000/);
+      assert.ok(html.includes(`/tun/${name}`), 'the assigned name shows up in the live list');
     } finally {
       await app.close();
     }
@@ -121,21 +129,26 @@ describe('/tun landing page', () => {
 });
 
 describe('tunnel gateway API', () => {
-  test('register returns a client id; invalid names are refused', async () => {
+  test('register returns a client id; anonymous names are random, token names validated', async () => {
     const app = await startServer({ env: FAST_ENV });
     try {
       const good = await register(app.base, 'Test_App-1');
       assert.equal(good.status, 201);
       assert.equal(good.json.success, true);
-      assert.equal(good.json.data.name, 'test_app-1', 'names are normalized to lowercase');
+      assert.match(good.json.data.name, /^[a-z]+-[a-z]+-[0-9a-f]{4}$/, 'anonymous callers get a random name');
+      assert.notEqual(good.json.data.name, 'test_app-1', 'the requested name is ignored without a token');
       assert.match(good.json.data.clientId, /^[0-9a-f]{24}$/);
 
-      const bad = await register(app.base, 'Bad Name!');
+      // With a token the requested name is honored (and still validated).
+      const acc = await createAccount(app.base);
+      const named = await register(app.base, 'Test_App-1', acc.token);
+      assert.equal(named.status, 201);
+      assert.equal(named.json.data.name, 'test_app-1', 'names are normalized to lowercase');
+      assert.equal(named.json.data.reserved, true);
+
+      const bad = await register(app.base, 'Bad Name!', acc.token);
       assert.equal(bad.status, 400);
       assert.equal(bad.json.error.code, 'INVALID_NAME');
-
-      const missing = await register(app.base, '');
-      assert.equal(missing.status, 400);
     } finally {
       await app.close();
     }
@@ -144,16 +157,17 @@ describe('tunnel gateway API', () => {
   test('list shows connected tunnels with counters', async () => {
     const app = await startServer({ env: FAST_ENV });
     try {
-      await register(app.base, 'alpha');
-      await register(app.base, 'beta');
+      const a = await register(app.base, 'alpha');
+      const b = await register(app.base, 'beta');
       const res = await fetch(`${app.base}/api/tunnel/list`);
       const json = await res.json();
-      assert.deepEqual(json.data.tunnels.map((t) => t.name), ['alpha', 'beta']);
+      assert.deepEqual(json.data.tunnels.map((t) => t.name), [a.json.data.name, b.json.data.name].sort());
       for (const t of json.data.tunnels) {
         assert.equal(t.pending, 0);
         assert.equal(t.served, 0);
         assert.equal(t.answered, 0);
         assert.ok(Number.isFinite(t.ageMs));
+        assert.equal(t.reserved, false, 'anonymous tunnels are not reserved');
       }
     } finally {
       await app.close();
@@ -164,9 +178,10 @@ describe('tunnel gateway API', () => {
     const app = await startServer({ env: FAST_ENV });
     try {
       const reg = await register(app.base, 'quiet');
+      const name = reg.json.data.name;
       const clientId = reg.json.data.clientId;
       const t0 = Date.now();
-      const res = await fetch(`${app.base}/api/tunnel/poll?name=quiet&client=${clientId}`);
+      const res = await fetch(`${app.base}/api/tunnel/poll?name=${encodeURIComponent(name)}&client=${clientId}`);
       const json = await res.json();
       assert.equal(res.status, 200);
       assert.equal(json.data.request, null);
@@ -180,13 +195,14 @@ describe('tunnel gateway API', () => {
     const app = await startServer({ env: FAST_ENV });
     try {
       const reg = await register(app.base, 'short');
+      const name = reg.json.data.name;
       const clientId = reg.json.data.clientId;
-      const close = await fetch(`${app.base}/api/tunnel/close`, { method: 'POST', headers: JSONH, body: JSON.stringify({ name: 'short', client: clientId }) });
+      const close = await fetch(`${app.base}/api/tunnel/close`, { method: 'POST', headers: JSONH, body: JSON.stringify({ name, client: clientId }) });
       assert.deepEqual(await close.json(), { success: true, data: { closed: true } });
-      const poll = await fetch(`${app.base}/api/tunnel/poll?name=short&client=${clientId}`);
+      const poll = await fetch(`${app.base}/api/tunnel/poll?name=${encodeURIComponent(name)}&client=${clientId}`);
       assert.equal(poll.status, 410);
       assert.equal((await poll.json()).error.code, 'TUNNEL_OFFLINE');
-      const again = await fetch(`${app.base}/api/tunnel/close`, { method: 'POST', headers: JSONH, body: JSON.stringify({ name: 'short' }) });
+      const again = await fetch(`${app.base}/api/tunnel/close`, { method: 'POST', headers: JSONH, body: JSON.stringify({ name }) });
       assert.deepEqual(await again.json(), { success: true, data: { closed: false } });
     } finally {
       await app.close();
@@ -196,8 +212,10 @@ describe('tunnel gateway API', () => {
   test('a second register takes the name over; the old client is told', async () => {
     const app = await startServer({ env: FAST_ENV });
     try {
-      const first = await register(app.base, 'dup');
-      const second = await register(app.base, 'dup');
+      const acc = await createAccount(app.base);
+      const first = await register(app.base, 'dup', acc.token);
+      const second = await register(app.base, 'dup', acc.token);
+      assert.equal(second.json.data.name, 'dup', 'the same account keeps its name');
       assert.notEqual(first.json.data.clientId, second.json.data.clientId);
       const poll = await fetch(`${app.base}/api/tunnel/poll?name=dup&client=${first.json.data.clientId}`);
       assert.equal(poll.status, 410);
@@ -216,15 +234,16 @@ describe('/tun/<name> reverse proxy', () => {
     const up = await startUpstream();
     try {
       const reg = await register(app.base, 'test');
+      const name = reg.json.data.name;
       const clientId = reg.json.data.clientId;
 
-      const visitor = fetch(`${app.base}/tun/test/hello?x=1`, {
+      const visitor = fetch(`${app.base}/tun/${name}/hello?x=1`, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain', 'X-Custom': 'abc' },
         body: 'ping-body',
       });
 
-      const picked = await pollUntil(app.base, 'test', clientId);
+      const picked = await pollUntil(app.base, name, clientId);
       assert.equal(picked.status, 200, JSON.stringify(picked.json));
       const req = picked.json.data.request;
       assert.equal(req.method, 'POST');
@@ -243,7 +262,7 @@ describe('/tun/<name> reverse proxy', () => {
         method: 'POST',
         headers: JSONH,
         body: JSON.stringify({
-          name: 'test',
+          name,
           client: clientId,
           id: req.id,
           status: upstream.status,
@@ -271,6 +290,7 @@ describe('/tun/<name> reverse proxy', () => {
     try {
       const res = await fetch(`${app.base}/tun/ghost`);
       assert.equal(res.status, 404);
+      assert.equal((await res.json()).error.code, 'TUNNEL_OFFLINE', 'non-browser clients get JSON');
     } finally {
       await app.close();
     }
@@ -279,9 +299,9 @@ describe('/tun/<name> reverse proxy', () => {
   test('a connected but silent client yields 504 TUNNEL_TIMEOUT', async () => {
     const app = await startServer({ env: FAST_ENV });
     try {
-      await register(app.base, 'slow');
+      const reg = await register(app.base, 'slow');
       const t0 = Date.now();
-      const res = await fetch(`${app.base}/tun/slow`);
+      const res = await fetch(`${app.base}/tun/${reg.json.data.name}`);
       assert.equal(res.status, 504);
       assert.ok(Date.now() - t0 < 5000, 'the fast env keeps the wait short');
     } finally {
@@ -292,11 +312,12 @@ describe('/tun/<name> reverse proxy', () => {
   test('a queued request counts as pending/served in the list', async () => {
     const app = await startServer({ env: FAST_ENV });
     try {
-      await register(app.base, 'busy');
-      const visitor = fetch(`${app.base}/tun/busy/one`);
+      const reg = await register(app.base, 'busy');
+      const name = reg.json.data.name;
+      const visitor = fetch(`${app.base}/tun/${name}/one`);
       await new Promise((r) => setTimeout(r, 120));
       const list = await (await fetch(`${app.base}/api/tunnel/list`)).json();
-      const busy = list.data.tunnels.find((t) => t.name === 'busy');
+      const busy = list.data.tunnels.find((t) => t.name === name);
       assert.equal(busy.served, 1);
       assert.equal(busy.pending, 1);
       await visitor;
