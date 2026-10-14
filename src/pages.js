@@ -167,7 +167,13 @@ const APP_NAV_CSS = `
       .quick-card h3 { margin: 0 0 .25rem; font-size: 1rem; }
       .quick-card p { margin: 0; color: #57606a; font-size: .85rem; }
       ul.facts { padding-left: 1.2rem; color: #57606a; }
-      ul.facts li { margin: .3rem 0; }`;
+      ul.facts li { margin: .3rem 0; }
+      /* Tunnel link on the React app-shell pages (/home, /explore, tube, chat):
+         the bundle owns #root, so this floats outside it, out of the chat
+         notices' corner. Server-rendered, no bundle change. */
+      .shell-tunnel-link { position: fixed; left: 1rem; bottom: 1rem; z-index: 40; display: inline-flex; align-items: center; gap: .35rem; padding: .45rem .85rem; border-radius: 999px; background: #fff; border: 1px solid #d0d7de; color: #0969da; font-weight: 600; font-size: .9rem; text-decoration: none; box-shadow: 0 2px 8px rgba(31,35,40,.12); }
+      .shell-tunnel-link:hover { border-color: #0969da; background: #f6f8fa; }
+      .shell-tunnel-link svg { color: #0969da; flex: none; }`;
 
 // Dark, YouTube-like styling for the Tube pages (feed, watch screen, channel). The React components
 // use these classes plus small inline styles. Plain CSS only, so the app-shell CSP still holds.
@@ -431,6 +437,12 @@ const CHAT_CSS = `
 function appShell({ title, bootstrap, fallbackHtml = '', extraCss = '' }) {
   const json = JSON.stringify(bootstrap).replace(/</g, '\\u003c');
   const noscript = '<noscript><p class="hint">This app needs JavaScript.</p></noscript>';
+  // Every shell page is behind login and its bootstrap carries the user, so the
+  // floating Tunnel link renders only for signed-in visitors. (Anon visitors
+  // never reach these pages; /tunnel itself would redirect them to /login.)
+  const tunnelLink = bootstrap && bootstrap.user
+    ? `<a class="shell-tunnel-link" href="/tunnel">${ICON.tunnel}<span>Tunnel</span></a>\n    `
+    : '';
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -442,7 +454,7 @@ function appShell({ title, bootstrap, fallbackHtml = '', extraCss = '' }) {
     ${SW_REGISTER_TAG}
   </head>
   <body class="wide">
-    <div id="root">${fallbackHtml}${noscript}</div>
+    ${tunnelLink}<div id="root">${fallbackHtml}${noscript}</div>
     <script type="application/json" id="app-bootstrap">${json}</script>
     <script src="/assets/app.js" defer></script>
   </body>

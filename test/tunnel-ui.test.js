@@ -218,6 +218,22 @@ describe('tunnel ui: pages', () => {
       await app.close();
     }
   });
+
+  test('the React app shell (/home) carries the server-rendered Tunnel link', async () => {
+    const app = await startServer({ env: FAST_ENV });
+    try {
+      const user = await signup(app);
+      const home = await fetch(`${app.base}/home`, { headers: { Cookie: user.cookie } });
+      assert.equal(home.status, 200);
+      const html = await home.text();
+      assert.ok(html.includes('class="shell-tunnel-link" href="/tunnel"'), 'shell tunnel link present');
+      assert.ok(html.includes('>Tunnel</span>'), 'labelled Tunnel');
+      // No bootstrap user, no link (defensive: shells are always behind login).
+      assert.ok(html.includes('id="app-bootstrap"'), 'bootstrap present');
+    } finally {
+      await app.close();
+    }
+  });
 });
 
 describe('tunnel ui: revoke and release', () => {
