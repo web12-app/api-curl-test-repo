@@ -32,6 +32,7 @@ const { Tunnels, randomName } = require('./tunnel');
 const { TunnelStore } = require('./tunnel-store');
 const { clientBundle } = require('./tunnel-package');
 const { installScript } = require('./tunnel-install');
+const tunnelDocs = require('./tunnel-docs');
 const pages = require('./pages');
 const offlinePage = require('./offline-page');
 
@@ -1947,6 +1948,37 @@ async function apiTunnelRelease(ctx) {
   ok(ctx, 200, { released: true, name: name.trim().toLowerCase() });
 }
 
+// ---- Tunnel documentation: HTML guide, plain markdown and llms.txt indexes.
+// All public on purpose (no secrets in the docs); same CSP as the other
+// standalone tunnel pages. Markdown/plain variants are cacheable a short while.
+
+function pageTunnelDocs(ctx) {
+  sendHtml(ctx.res, 200, tunnelDocs.docsPageHtml({ base: publicBase(ctx.req) }), {
+    'Content-Security-Policy': INSTALL_PAGE_CSP,
+  });
+}
+
+function apiTunnelDocsMd(ctx) {
+  send(ctx.res, 200, {
+    'Content-Type': 'text/markdown; charset=utf-8',
+    'Cache-Control': 'public, max-age=300',
+  }, tunnelDocs.guideMarkdown());
+}
+
+function apiTunnelLlms(ctx) {
+  send(ctx.res, 200, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'public, max-age=300',
+  }, tunnelDocs.llmsTxt({ base: publicBase(ctx.req) }));
+}
+
+function apiTunnelLlmsFull(ctx) {
+  send(ctx.res, 200, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'public, max-age=300',
+  }, tunnelDocs.llmsFullTxt());
+}
+
 // Visitor-facing traffic inspector. GET ?token=... or POST the login form.
 async function pageTunnelDashboard(ctx) {
   let token = '';
@@ -2106,6 +2138,10 @@ const ROUTES = [
   // ---- Pips Tunnel: /tun/<name> publishes a localhost app (see tunnel-client/).
   { method: 'GET', path: '/tun', handler: pageTunnelHome },
   { method: 'GET', path: '/tunnel.sh', handler: apiTunnelInstallScript },
+  { method: 'GET', path: '/docs/tunnel', handler: pageTunnelDocs },
+  { method: 'GET', path: '/docs/tunnel.md', handler: apiTunnelDocsMd },
+  { method: 'GET', path: '/llms.txt', handler: apiTunnelLlms },
+  { method: 'GET', path: '/llms-full.txt', handler: apiTunnelLlmsFull },
   { method: 'GET', path: '/api/tunnel/list', handler: apiTunnelList },
   { method: 'GET', path: '/api/tunnel/poll', handler: apiTunnelPoll },
   { method: 'GET', path: '/api/tunnel/client.tar.gz', handler: apiTunnelClientTar },

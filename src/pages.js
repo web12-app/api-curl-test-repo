@@ -784,7 +784,7 @@ function tunnelPage({ tunnels, base = '' }) {
         <h1>Pips Tunnel</h1>
         <p class="tagline">Put any localhost app on this server's public URL. Run one command, share one link.</p>
         <a class="tun-btn" href="/api/tunnel/client.tar.gz" download>tunnel.tar.gz &nbsp;·&nbsp; download</a>
-        <p class="tun-sub">Zero dependencies &middot; needs <b>Node 18+</b> &middot; macOS / Linux / Windows</p>
+        <p class="tun-sub">Zero dependencies &middot; needs <b>Node 18+</b> &middot; macOS / Linux / Windows &middot; <a href="/docs/tunnel">Full guide</a></p>
       </section>
 
       <section class="panel">
@@ -810,6 +810,8 @@ function tunnelPage({ tunnels, base = '' }) {
         <a href="/">Open web app</a>
         <a href="/app">Get the Pips app</a>
         <a href="/api/health">Service status</a>
+        <a href="/docs/tunnel">Full guide</a>
+        <a href="/llms.txt">llms.txt</a>
       </footer>
     </main>
   </body>
@@ -1101,7 +1103,7 @@ function tunnelManagePage({ user, tokens, names, error = '', created = null }) {
       ${reserveForm}
     </section>
     <p class="hint foot-links">
-      Public tunnels: <a href="/tun">/tun</a> &middot; Deep inspection: <a href="/tun/dashboard">/tun/dashboard</a><br>
+      Public tunnels: <a href="/tun">/tun</a> &middot; Deep inspection: <a href="/tun/dashboard">/tun/dashboard</a> &middot; Full guide: <a href="/docs/tunnel">/docs/tunnel</a><br>
       Quickstart: <code>curl -fsSL /tunnel.sh | sh</code> then <code>tun login &lt;token&gt;</code> then <code>./tun start 5000 &lt;your-name&gt;</code>
     </p>
     <script>
