@@ -167,6 +167,74 @@ class TunnelStore {
     return { name, released: true };
   }
 
+  // ---- Protected names: an optional per-name access gate for /tun/<name>.
+
+  // The name record behind the 404/403 ownership dance (shared by protect,
+  // unprotect and logs). Anonymous (unowned) names count as not found: there
+  // is no account that could own the gate.
+  ownedNameRecord(rawName, accountId) {
+    const name = String(rawName || '').trim().toLowerCase();
+    const rec = this.doc.names[name];
+    if (!rec || !rec.accountId) {
+      throw new AppError(404, 'NAME_NOT_FOUND', 'No reserved tunnel name goes by that name.');
+    }
+    if (rec.accountId !== accountId) {
+      throw new AppError(403, 'NAME_NOT_YOURS', 'That tunnel name belongs to a different tunnel token.');
+    }
+    return rec;
+  }
+
+  // Attach an access gate to a name the account owns. The full token comes
+  // back exactly once; the store keeps only its sha256 hash and a mask. The
+  // token is caller-supplied (16-128 chars) or a random 32-hex string.
+  protectName(rawName, accountId, rawToken) {
+    const rec = this.ownedNameRecord(rawName, accountId);
+    let token;
+    if (rawToken !== undefined && rawToken !== null && String(rawToken) !== '') {
+      token = String(rawToken);
+      if (token.length < 16 || token.length > 128) {
+        throw new AppError(400, 'INVALID_ACCESS_TOKEN', 'The access token must be 16-128 characters.');
+      }
+    } else {
+      token = crypto.randomBytes(16).toString('hex');
+    }
+    rec.access = { tokenHash: sha256(token), tokenMask: maskToken(token) };
+    this.markDirty();
+    return { token, tokenMask: rec.access.tokenMask };
+  }
+
+  // Take the gate off. The record (and its traffic history) stays.
+  unprotectName(rawName, accountId) {
+    const rec = this.ownedNameRecord(rawName, accountId);
+    delete rec.access;
+    this.markDirty();
+    return { name: String(rawName || '').trim().toLowerCase(), protected: false };
+  }
+
+  isProtected(name) {
+    const rec = this.doc.names[String(name || '').trim().toLowerCase()];
+    return Boolean(rec && rec.access && rec.access.tokenHash);
+  }
+
+  // True when the name has no gate, or the visitor token hashes to the value
+  // the owner set. Callers gate on isProtected() first for the 401 path.
+  checkAccess(name, visitorToken) {
+    const rec = this.doc.names[String(name || '').trim().toLowerCase()];
+    if (!rec || !rec.access) return true;
+    return rec.access.tokenHash === sha256(String(visitorToken || ''));
+  }
+
+  // How many names currently carry an access gate (stats + dashboard).
+  countProtected() {
+    return Object.values(this.doc.names).filter((n) => n.access && n.access.tokenHash).length;
+  }
+
+  // The request-log ring for one owned name (noteTraffic caps it at LOG_LIMIT).
+  logsFor(rawName, accountId) {
+    const rec = this.ownedNameRecord(rawName, accountId);
+    return { name: String(rawName || '').trim().toLowerCase(), logs: rec.logs || [] };
+  }
+
   async verify(token) {
     await this.load();
     const hash = sha256(String(token || ''));

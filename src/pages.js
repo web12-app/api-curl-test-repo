@@ -858,6 +858,12 @@ function tunnelErrorPage({ kind, name, base = '' }) {
       hint: `The tunnel <b>/tun/${escName}</b> forwards plain HTTP requests only.`,
       refresh: false,
     },
+    protected: {
+      title: 'Tunnel protected',
+      body: 'This tunnel requires an access token.',
+      hint: `The owner has gated <b>/tun/${escName}</b>. Append ?access=<token> to the URL, or send an x-tunnel-access header.`,
+      refresh: false,
+    },
   };
   const v = variants[kind] || variants.offline;
   return `<!doctype html>

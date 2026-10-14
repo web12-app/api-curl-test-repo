@@ -62,7 +62,9 @@ class Tunnels {
     }
   }
 
-  register(rawName, { accountId } = {}) {
+  // port/proto describe the upstream the client will forward to (register
+  // body enrichment); the server validates them, defaults: no port, proto 1.
+  register(rawName, { accountId, port = null, proto = 1 } = {}) {
     const name = this.validateName(rawName);
     this.sweep();
     if (this.claims.size && this.claims.has(name) && this.claims.get(name) !== accountId) {
@@ -86,6 +88,8 @@ class Tunnels {
       pollWaiters: [],
       served: 0,
       answered: 0,
+      port: port === undefined || port === null ? null : port,
+      proto: proto || 1,
     };
     this.map.set(name, t);
     if (accountId) this.claims.set(name, accountId);
@@ -192,6 +196,8 @@ class Tunnels {
         answered: t.answered,
         ageMs: this.now() - t.registeredAt,
         reserved: this.claims.has(t.name),
+        port: t.port,
+        proto: t.proto,
       }));
   }
 
@@ -204,9 +210,12 @@ class Tunnels {
       totals.served += t.served;
       totals.answered += t.answered;
       // Requests currently waiting for the client's answer (in-flight, not just
-      // queued). `protected` is a placeholder for per-tunnel protection flags.
+      // queued). `protected` counts names behind an access gate in the store.
       totals.activeRequests += t.waiters.size;
     }
+    // Protected names live in the persisted store, so the gate survives
+    // restarts and reconnects; 0 when no store is attached (bare unit use).
+    if (this.store) totals.protected = this.store.countProtected();
     return totals;
   }
 }

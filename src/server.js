@@ -48,6 +48,7 @@ const TUNNEL_STRIPPED_HEADERS = new Set([
   'trailer', 'content-length', 'accept-encoding', 'content-encoding',
 ]);
 const TUNNEL_PROXY_PATTERN = '^/tun/([a-z0-9][a-z0-9_-]{0,31})(/.*)?$';
+const TUNNEL_REGISTER_WINDOW_MS = 60 * 1000; // per-IP budget window for register/account
 
 function positiveInt(value, fallback) {
   const n = Number(value);
@@ -1643,9 +1644,47 @@ async function apiChatCancel(ctx) {
 // responses back. register/respond/close are csrfExempt: the caller is a CLI
 // on another machine, not a browser session on this site.
 
+// G8: optional register enrichment — which local port/proto the client
+// forwards to. Parsed once here, stored on the live tunnel record, shown in
+// the list() rows.
+function parseTunnelPort(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    throw new AppError(400, 'INVALID_PORT', 'port must be an integer from 1 to 65535.');
+  }
+  return n;
+}
+
+function parseTunnelProto(value) {
+  if (value === undefined || value === null || value === '') return 1;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 9) {
+    throw new AppError(400, 'INVALID_PROTO', 'proto must be an integer from 1 to 9.');
+  }
+  return n;
+}
+
+// G9: per-IP budget shared by the tunnel registration surfaces (register +
+// account). The default of 240/min is generous enough that normal CLI use
+// never trips it; TUNNEL_REGISTER_RATE tightens it. The limiter is created in
+// createServer and hangs off the Tunnels instance.
+function checkTunnelRate(ctx) {
+  const limiter = ctx.tunnel.registerLimiter;
+  if (!limiter) return;
+  const key = `tunreg:${ctx.ip}`;
+  if (limiter.count(key, TUNNEL_REGISTER_WINDOW_MS) >= ctx.tunnel.registerRate) {
+    throw new AppError(429, 'RATE_LIMITED', 'Too many tunnel registrations from this address; try again in a minute.');
+  }
+  limiter.record(key);
+}
+
 async function apiTunnelRegister(ctx) {
   const body = await readJsonBody(ctx);
+  checkTunnelRate(ctx);
   await ctx.tunnel.store.load();
+  const port = parseTunnelPort(body ? body.port : undefined);
+  const proto = parseTunnelProto(body ? body.proto : undefined);
   // Refresh the reserved-name map from the persisted store (a cheap Map
   // rebuild) so claims survive restarts and are correct on the first register.
   ctx.tunnel.claims = ctx.tunnel.store.claims();
@@ -1657,15 +1696,15 @@ async function apiTunnelRegister(ctx) {
   }
   let out;
   if (account && body.name !== undefined && body.name !== null && String(body.name) !== '') {
-    out = ctx.tunnel.register(String(body.name), { accountId: account.id });
+    out = ctx.tunnel.register(String(body.name), { accountId: account.id, port, proto });
   } else if (account) {
-    out = ctx.tunnel.register(randomName(), {});
+    out = ctx.tunnel.register(randomName(), { port, proto });
   } else {
     // Anonymous callers get a fresh random name; their requested name is ignored.
     let lastErr = null;
     for (let i = 0; i < 5; i++) {
       try {
-        out = ctx.tunnel.register(randomName(), {});
+        out = ctx.tunnel.register(randomName(), { port, proto });
         lastErr = null;
         break;
       } catch (err) {
@@ -1824,6 +1863,23 @@ async function apiTunnelProxy(ctx) {
   if (/[\x00-\x1f\x7f]/.test(path) || /[\x00-\x1f\x7f]/.test(decoded)) {
     return badPath('The path contains control characters.');
   }
+  // Protected names (G6): the owner can gate /tun/<name> behind an access
+  // token. Visitors pass it as ?access= or an x-tunnel-access header; the
+  // gate is checked against the store's hash before anything is forwarded.
+  if (ctx.tunnel.store) {
+    await ctx.tunnel.store.load();
+    if (ctx.tunnel.store.isProtected(name)) {
+      const access = ctx.url.searchParams.get('access') || String(ctx.req.headers['x-tunnel-access'] || '');
+      if (!ctx.tunnel.store.checkAccess(name, access)) {
+        if (wantsHtml(ctx.req)) {
+          return sendHtml(ctx.res, 401, pages.tunnelErrorPage({ kind: 'protected', name, base: publicBase(ctx.req) }), {
+            'Content-Security-Policy': INSTALL_PAGE_CSP,
+          });
+        }
+        return sendJson(ctx.res, 401, { success: false, error: { code: 'ACCESS_REQUIRED', message: 'This tunnel requires an access token. Append ?access=<token> or send an x-tunnel-access header.' } });
+      }
+    }
+  }
   // Header hygiene: the visitor is not trusted. Whatever it claims about the
   // proxy chain (x-forwarded-*) or about the tunnel itself (x-tunnel-* — the
   // client's error marker included) is dropped; a small trusted set is built
@@ -1889,6 +1945,7 @@ async function apiTunnelProxy(ctx) {
 
 async function apiTunnelAccount(ctx) {
   const body = await readJsonBody(ctx);
+  checkTunnelRate(ctx);
   const { account, token } = await ctx.tunnel.store.createAccount(body && body.label);
   ok(ctx, 201, { accountId: account.id, token, label: account.label, tokenMask: account.tokenMask });
 }
@@ -1908,6 +1965,38 @@ async function apiTunnelStats(ctx) {
     names: ctx.tunnel.store ? Object.keys(ctx.tunnel.store.doc.names).length : 0,
     uptimeMs: Math.round(process.uptime() * 1000),
   });
+}
+
+// ---- Protected names + logs (G6/G7): owned by the tunnel token that owns
+// the name. csrfExempt like the other CLI endpoints; Bearer tunt_ auth.
+
+async function apiTunnelProtect(ctx) {
+  const body = await readJsonBody(ctx);
+  await ctx.tunnel.store.load();
+  const account = await ctx.tunnel.store.verify(bearerToken(ctx.req));
+  if (!account) throw new AppError(401, 'INVALID_TOKEN', 'Send Authorization: Bearer <tunnel token>.');
+  const name = String((body && body.name) || '').trim().toLowerCase();
+  const out = ctx.tunnel.store.protectName(name, account.id, body ? body.token : undefined);
+  ok(ctx, 201, { name, protected: true, token: out.token, tokenMask: out.tokenMask });
+}
+
+async function apiTunnelUnprotect(ctx) {
+  const body = await readJsonBody(ctx);
+  await ctx.tunnel.store.load();
+  const account = await ctx.tunnel.store.verify(bearerToken(ctx.req));
+  if (!account) throw new AppError(401, 'INVALID_TOKEN', 'Send Authorization: Bearer <tunnel token>.');
+  const out = ctx.tunnel.store.unprotectName(String((body && body.name) || ''), account.id);
+  ok(ctx, 200, { name: out.name, protected: false });
+}
+
+// The recent request ring for one owned name (noteTraffic caps it at 50 rows).
+async function apiTunnelLogs(ctx) {
+  const name = String(ctx.url.searchParams.get('name') || '').trim().toLowerCase();
+  if (!name) throw new AppError(400, 'INVALID_NAME', 'Send ?name=<app-name>.');
+  await ctx.tunnel.store.load();
+  const account = await ctx.tunnel.store.verify(bearerToken(ctx.req));
+  if (!account) throw new AppError(401, 'INVALID_TOKEN', 'Send Authorization: Bearer <tunnel token>.');
+  ok(ctx, 200, ctx.tunnel.store.logsFor(name, account.id));
 }
 
 // ---- Tunnel tokens + reserved names for signed-in site users (the /tunnel manager)
@@ -2190,6 +2279,9 @@ const ROUTES = [
   { method: 'POST', path: '/api/tunnel/respond', handler: apiTunnelRespond, csrfExempt: true },
   { method: 'POST', path: '/api/tunnel/close', handler: apiTunnelClose, csrfExempt: true },
   { method: 'POST', path: '/api/tunnel/account', handler: apiTunnelAccount, csrfExempt: true },
+  { method: 'POST', path: '/api/tunnel/protect', handler: apiTunnelProtect, csrfExempt: true },
+  { method: 'POST', path: '/api/tunnel/unprotect', handler: apiTunnelUnprotect, csrfExempt: true },
+  { method: 'GET', path: '/api/tunnel/logs', handler: apiTunnelLogs },
   { method: 'GET', path: '/api/tunnel/whoami', handler: apiTunnelWhoami },
   { method: 'GET', path: '/api/tunnel/stats', handler: apiTunnelStats },
   // ---- Tunnel manager for signed-in site users: tokens + reserved names.
@@ -2324,6 +2416,10 @@ function createServer(options = {}) {
   // The store loads lazily (memoized); tunnel handlers await store.load().
   const tunnelStore = new TunnelStore({ storage: auth.storage, saveDelayMs: positiveInt(env.TUNNEL_SAVE_MS, 5000) });
   tunnels.store = tunnelStore;
+  // Per-IP registration budget for register/account (see checkTunnelRate).
+  // TUNNEL_REGISTER_RATE is per window; the default is deliberately generous.
+  tunnels.registerLimiter = new RateLimiter(options.now || Date.now);
+  tunnels.registerRate = positiveInt(env.TUNNEL_REGISTER_RATE, 240);
   const server = http.createServer((req, res) => {
     dispatch(req, res, auth, corsOrigins, modelChat, tunnels).catch((err) => {
       console.error(`Unhandled error: ${err && err.name}`);
