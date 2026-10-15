@@ -548,6 +548,7 @@ function docsPageHtml({ base = '' } = {}) {
       </section>
       ${sections}
       <footer class="tun-foot">
+        <a href="/docs">App API docs</a>
         <a href="/llms.txt">llms.txt</a>
         <a href="/llms-full.txt">llms-full.txt</a>
         <a href="/tunnel.sh">tunnel.sh installer</a>
@@ -571,6 +572,7 @@ function llmsTxt({ base = '' } = {}) {
     '',
     '## Docs',
     `- [Tunnel full guide](${b}/docs/tunnel.md): the complete guide — install, quickstart, CLI, HTTP API, error codes, limits, persistence, troubleshooting.`,
+    `- [App API docs](${b}/docs): the complete HTTP API reference for the whole app — every endpoint, both auth schemes, error codes, limits.`,
     `- [llms-full.txt](${b}/llms-full.txt): the entire guide as one plain markdown document.`,
     `- [Landing page](${b}/tun): installer one-liner, quickstart and the currently connected tunnels.`,
     `- [Tunnel dashboard](${b}/tun/dashboard): paste a tunt_ token to inspect per-name traffic and request logs.`,

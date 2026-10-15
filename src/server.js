@@ -33,6 +33,7 @@ const { TunnelStore } = require('./tunnel-store');
 const { clientBundle } = require('./tunnel-package');
 const { installScript } = require('./tunnel-install');
 const tunnelDocs = require('./tunnel-docs');
+const appDocs = require('./app-docs');
 const pages = require('./pages');
 const offlinePage = require('./offline-page');
 
@@ -2088,6 +2089,15 @@ function pageTunnelDocs(ctx) {
   });
 }
 
+// The whole-app API reference: every route, both auth schemes, the error-code
+// table and the server limits. Public, cached briefly like the tunnel docs.
+function pageAppDocs(ctx) {
+  sendHtml(ctx.res, 200, appDocs.appDocsHtml({ base: publicBase(ctx.req) }), {
+    'Content-Security-Policy': INSTALL_PAGE_CSP,
+    'Cache-Control': 'public, max-age=300',
+  });
+}
+
 function apiTunnelDocsMd(ctx) {
   send(ctx.res, 200, {
     'Content-Type': 'text/markdown; charset=utf-8',
@@ -2268,6 +2278,7 @@ const ROUTES = [
   // ---- Pips Tunnel: /tun/<name> publishes a localhost app (see tunnel-client/).
   { method: 'GET', path: '/tun', handler: pageTunnelHome },
   { method: 'GET', path: '/tunnel.sh', handler: apiTunnelInstallScript },
+  { method: 'GET', path: '/docs', handler: pageAppDocs },
   { method: 'GET', path: '/docs/tunnel', handler: pageTunnelDocs },
   { method: 'GET', path: '/docs/tunnel.md', handler: apiTunnelDocsMd },
   { method: 'GET', path: '/llms.txt', handler: apiTunnelLlms },
