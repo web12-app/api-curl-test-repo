@@ -286,13 +286,13 @@ function layout(title, body, user, { wide = false, extraCss = '', active = '' } 
     `<a class="nav-link${active === key ? ' active' : ''}" href="${href}">${icon}<span>${label}</span></a>`;
   const nav = user
     ? `<a class="brand" href="/home">${ICON.box}<span>File Vault</span></a>
-       <div class="nav-links">${navLink('/home', 'home', ICON.home, 'Home')}${navLink('/explore', 'explore', ICON.compass, 'Explore')}${navLink('/tunnel', 'tunnel', ICON.tunnel, 'Tunnel')}</div>
+       <div class="nav-links">${navLink('/home', 'home', ICON.home, 'Home')}${navLink('/explore', 'explore', ICON.compass, 'Explore')}${navLink('/tunnel', 'tunnel', ICON.tunnel, 'Tunnel')}${navLink('/docs', 'docs', ICON.layers, 'API docs')}</div>
        <div class="nav-right">
          <span class="user-chip" title="Signed in">${ICON.user}<span>${escapeHtml(user.username)}</span></span>
          <form method="post" action="/logout" class="inline"><button type="submit" class="nav-logout">${ICON.logout}<span>Log out</span></button></form>
        </div>`
     : `<a class="brand" href="/">${ICON.box}<span>File Vault</span></a>
-       <div class="nav-links"></div>
+       <div class="nav-links"><a class="nav-link" href="/docs">API docs</a></div>
        <div class="nav-right"><a href="/login">Log in</a> <a href="/signup">Sign up</a></div>`;
   return `<!doctype html>
 <html lang="en">
@@ -810,6 +810,7 @@ function tunnelPage({ tunnels, base = '' }) {
         <a href="/">Open web app</a>
         <a href="/app">Get the Pips app</a>
         <a href="/api/health">Service status</a>
+        <a href="/docs">API docs</a>
         <a href="/docs/tunnel">Full guide</a>
         <a href="/llms.txt">llms.txt</a>
       </footer>
@@ -1115,7 +1116,7 @@ function tunnelManagePage({ user, tokens, names, error = '', created = null }) {
       ${reserveForm}
     </section>
     <p class="hint foot-links">
-      Public tunnels: <a href="/tun">/tun</a> &middot; Deep inspection: <a href="/tun/dashboard">/tun/dashboard</a> &middot; Full guide: <a href="/docs/tunnel">/docs/tunnel</a><br>
+      Public tunnels: <a href="/tun">/tun</a> &middot; Deep inspection: <a href="/tun/dashboard">/tun/dashboard</a> &middot; Full guide: <a href="/docs/tunnel">/docs/tunnel</a> &middot; API docs: <a href="/docs">/docs</a><br>
       Quickstart: <code>curl -fsSL /tunnel.sh | sh</code> then <code>tun login &lt;token&gt;</code> then <code>./tun start 5000 &lt;your-name&gt;</code>
     </p>
     <script>
