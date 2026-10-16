@@ -51,6 +51,20 @@ const BASE_CSS = `
       button { padding: .5rem 1rem; cursor: pointer; }
       .error { color: #cf222e; }`;
 
+// Live status card on the home page: green while the server answers, grey when the status cannot be read.
+const LIVE_CSS = `
+      .live-card { display: flex; flex-wrap: wrap; gap: .75rem 1rem; align-items: center; border: 1px solid #d0d7de; border-left: 4px solid #1a7f37; border-radius: 10px; padding: .9rem 1rem; margin: 1rem 0; background: #fff; }
+      .live-card.live-off { border-left-color: #8c959f; }
+      .live-dot { width: .7rem; height: .7rem; border-radius: 50%; background: #1a7f37; box-shadow: 0 0 0 4px rgba(26,127,55,.18); flex: none; }
+      .live-card.live-off .live-dot { background: #8c959f; box-shadow: none; }
+      .live-main { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
+      .live-main a { color: #0969da; }
+      .live-meta { display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; margin: 0; }
+      .live-meta div { min-width: 6rem; }
+      .live-meta dt { color: #57606a; font-size: .8rem; }
+      .live-meta dd { margin: 0; font-weight: 600; }
+`;
+
 // Dashboard styles: a wider page, a table that turns into cards on small screens, and the upload area.
 const DASHBOARD_CSS = `
       [hidden] { display: none !important; }
@@ -449,7 +463,7 @@ function appShell({ title, bootstrap, fallbackHtml = '', extraCss = '' }) {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${escapeHtml(title)}</title>
-    <style>${BASE_CSS}${APP_NAV_CSS}${DASHBOARD_CSS}${extraCss}
+    <style>${BASE_CSS}${APP_NAV_CSS}${DASHBOARD_CSS}${LIVE_CSS}${extraCss}
     </style>
     ${SW_REGISTER_TAG}
   </head>

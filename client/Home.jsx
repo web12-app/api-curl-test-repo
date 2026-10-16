@@ -11,6 +11,82 @@ function fmtStatBytes(bytes) {
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
+function fmtUptime(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
+
+function fmtWhen(iso) {
+  const t = Date.parse(iso || '');
+  return Number.isNaN(t) ? '-' : new Date(t).toLocaleString();
+}
+
+// Live status of this server: the public URL and run number (set by the live-tunnel workflow), when it
+// started, and how long it has been up. Polls every 30 seconds.
+function LiveStatus() {
+  const [live, setLive] = useState(null); // null = loading, 'error', or the status object
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      api('/api/live-status').then((res) => {
+        if (alive) setLive(res.ok && res.body ? res.body : 'error');
+      });
+    load();
+    const timer = setInterval(load, 30000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  if (live === null) {
+    return (
+      <div className="live-card">
+        <span className="live-dot" />
+        <span>Checking live status…</span>
+      </div>
+    );
+  }
+  if (live === 'error') {
+    return (
+      <div className="live-card live-off">
+        <span className="live-dot" />
+        <span>Live status is unavailable right now.</span>
+      </div>
+    );
+  }
+  return (
+    <div className="live-card" role="status">
+      <span className="live-dot" />
+      <div className="live-main">
+        <strong>Live</strong>
+        {live.url ? <a href={live.url} rel="noreferrer"> {live.url}</a> : <span> · running locally</span>}
+      </div>
+      <dl className="live-meta">
+        <div>
+          <dt>Serving since</dt>
+          <dd>{fmtWhen(live.startedAt)}</dd>
+        </div>
+        <div>
+          <dt>Uptime</dt>
+          <dd>{fmtUptime(live.uptimeSeconds)}</dd>
+        </div>
+        {live.runId ? (
+          <div>
+            <dt>Run</dt>
+            <dd>#{live.runId}</dd>
+          </div>
+        ) : null}
+      </dl>
+    </div>
+  );
+}
+
 function HomePage({ user, filesEnabled, maxBytes }) {
   const [stats, setStats] = useState(null); // null = loading, 'error', or { files, bytes, shared, links }
 
@@ -58,6 +134,8 @@ function HomePage({ user, filesEnabled, maxBytes }) {
           </p>
         </div>
       </div>
+
+      <LiveStatus />
 
       <h2>Overview</h2>
       {filesEnabled ? (

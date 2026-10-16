@@ -156,6 +156,9 @@ jobs:
         env:
           # Browser origin allowed to call /api/: this run's Quick Tunnel URL (exact origin, no path).
           CORS_ALLOWED_ORIGINS: ${{ env.PUBLIC_URL }}
+          # Shown on the home page as the live status: this run's public URL and run number.
+          PUBLIC_URL: ${{ env.PUBLIC_URL }}
+          LIVE_RUN_ID: ${{ github.run_id }}
           GITHUB_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
           # File storage settings. Repository variables (not secrets). GitHub reserves the GITHUB_ prefix for

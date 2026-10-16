@@ -61,6 +61,7 @@ Cookie or \`Bearer sat_…\` unless noted.
 | Method and path | Auth | What it does | Typical errors |
 | --- | --- | --- | --- |
 | \`GET /api/health\` | public | Service status and configuration summary. | — |
+| \`GET /api/live-status\` | public | Live status: public URL, run number, start time, and uptime. | — |
 | \`POST /api/signup\` | public | Create an account, start a session. | \`INVALID_USERNAME\` 400, \`INVALID_PASSWORD\` 400, \`USERNAME_TAKEN\` 409 |
 | \`POST /api/login\` | public | Sign in. | \`INVALID_CREDENTIALS\` 401, \`RATE_LIMITED\` 429 |
 | \`POST /api/logout\` | session | End the session (a Bearer logout revokes that API token). | \`NOT_AUTHENTICATED\` 401 |
