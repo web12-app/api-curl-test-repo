@@ -1,4 +1,4 @@
-# Run the app on a GitHub runner, expose it through the ngrok domain, and keep it live automatically.
+# Run the app on a GitHub runner, expose it through a Cloudflare Quick Tunnel, and keep it live automatically.
 #
 # How the service stays up without anyone pressing a button:
 # - Clean expiry relay: when a run reaches its time limit it stops cleanly (releasing the tunnel) and requests one
@@ -10,20 +10,19 @@
 #   dispatch is ever lost.
 # - Redeploy on edit: every push to main restarts the live site with the latest code (after the tests pass first).
 # - The concurrency group cancels the previous session when a new run arrives, so an edit to main goes live within
-#   a few minutes and only one session can ever hold the ngrok domain. Each takeover has a short (~2-4 min)
-#   downtime while the new run boots. The public URL never changes: every run reuses the static ngrok domain.
+#   a few minutes. Each takeover has a short (~2-4 min) downtime while the new run boots.
+# - Cloudflare Quick Tunnels are free and need no account or token, but each run gets a NEW random
+#   https://<words>.trycloudflare.com URL. The URL is printed in the run summary. Anything that links to the
+#   site (for example the lives Pages entry) must be updated when it changes.
 #
-# Only one ngrok agent can hold the domain at a time. The tunnel start below retries briefly in case a cancelled
-# predecessor is still releasing it.
 #
 # Secrets (Settings > Secrets and variables > Actions > Secrets):
-#   NGROK_AUTHTOKEN     ngrok auth token
 #   PRIVATE_DATA_TOKEN  GitHub token with read/write access to the private data repo only
 #   SESSION_SECRET      at least 32 random characters
 # Nothing secret is printed. The follow-up request uses this run's built-in GITHUB_TOKEN, which can only dispatch
 # and list runs of this repository.
 
-name: Live app on ngrok
+name: Live app on Cloudflare
 
 on:
   workflow_dispatch:
@@ -55,15 +54,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NGROK_DOMAIN: precision-pledge-fled.ngrok-free.dev
   PRIVATE_DATA_REPO: web12-app/api-curl-private-data
   # URL imports accept every link shape. This lifts the private-network guard, so links to the
   # runner's own loopback and internal addresses also import. Remove it to restore the guard.
   IMPORT_ALLOW_PRIVATE: "1"
-  # Browser origins allowed to call /api/. Exact origin, no path, no wildcard.
-  CORS_ALLOWED_ORIGINS: https://precision-pledge-fled.ngrok-free.dev
-  # ngrok agent download, pinned by SHA-256. A new ngrok release changes the hash and fails the run until this is updated.
-  NGROK_SHA256: cec0b4997fcc5f529dfc74bac89050354d11a915f968720600039738fdf330cf
+  # cloudflared binary, pinned by version and SHA-256. Update both together when upgrading.
+  CLOUDFLARED_VERSION: "2026.10.1"
+  CLOUDFLARED_SHA256: "3bfc539f45d2620c71debb7a86be0efa737ed5ccbad9eb85c787116900e5c586"
   APP_PORT: "3000"
   WORKFLOW_FILE: live-tunnel.yml
 
@@ -82,7 +79,6 @@ jobs:
         env:
           MINUTES: ${{ inputs.minutes || '300' }}
           AUTO_RESTARTS: ${{ inputs.auto_restarts || '24' }}
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
         run: |
@@ -97,7 +93,6 @@ jobs:
             echo "::error::auto_restarts must be a whole number from 0 to 100."
             failed=1
           fi
-          [ -n "$NGROK_AUTHTOKEN" ] || { echo "::error::Secret NGROK_AUTHTOKEN is not set."; failed=1; }
           [ -n "$PRIVATE_DATA_TOKEN" ] || { echo "::error::Secret PRIVATE_DATA_TOKEN is not set."; failed=1; }
           [ "${#SESSION_SECRET}" -ge 32 ] || { echo "::error::Secret SESSION_SECRET is missing or shorter than 32 characters."; failed=1; }
           exit "$failed"
@@ -118,18 +113,45 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Install ngrok
+      - name: Install cloudflared
         run: |
           set -euo pipefail
-          curl -sSL -o ngrok.tgz https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
-          echo "${NGROK_SHA256}  ngrok.tgz" | sha256sum -c -
+          curl -sSL -o cloudflared "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
+          echo "${CLOUDFLARED_SHA256}  cloudflared" | sha256sum -c -
           mkdir -p "$HOME/bin"
-          tar -xzf ngrok.tgz -C "$HOME/bin"
-          rm -f ngrok.tgz
+          install -m 0755 cloudflared "$HOME/bin/cloudflared"
+          rm -f cloudflared
           echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Start Cloudflare tunnel
+        run: |
+          set -uo pipefail
+          # Quick Tunnel: free, no account. It starts before the app so the public URL is known when the app boots;
+          # the app's allowed browser origin is set from it.
+          nohup "$HOME/bin/cloudflared" tunnel --url "http://127.0.0.1:$APP_PORT" --no-autoupdate > cloudflared.log 2>&1 &
+          echo $! > cloudflared.pid
+          url=""
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$(cat cloudflared.pid)" 2>/dev/null; then
+              echo "::error::cloudflared exited during startup. Last output:"
+              tail -20 cloudflared.log
+              exit 1
+            fi
+            url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' cloudflared.log | grep -v '^https://api\.' | head -1 || true)
+            [ -n "$url" ] && break
+            sleep 2
+          done
+          if [ -z "$url" ]; then
+            echo "::error::cloudflared did not print a trycloudflare URL within 120 s."
+            exit 1
+          fi
+          echo "PUBLIC_URL=$url" >> "$GITHUB_ENV"
+          echo "Quick Tunnel URL: $url"
 
       - name: Start app
         env:
+          # Browser origin allowed to call /api/: this run's Quick Tunnel URL (exact origin, no path).
+          CORS_ALLOWED_ORIGINS: ${{ env.PUBLIC_URL }}
           GITHUB_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
           # File storage settings. Repository variables (not secrets). GitHub reserves the GITHUB_ prefix for
@@ -166,38 +188,19 @@ jobs:
           echo "::error::The app did not start (last HTTP status: $code)."
           exit 1
 
-      - name: Start ngrok tunnel
-        env:
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+      - name: Check public URL
         run: |
           set -uo pipefail
-          ngrok config add-authtoken "$NGROK_AUTHTOKEN" > /dev/null
-          # A cancelled predecessor may still be releasing the domain for a few seconds. Retry instead of failing
-          # immediately when the domain is briefly held or the public check is slow to pass.
-          for round in $(seq 1 8); do
-            nohup ngrok http "$APP_PORT" --url="https://$NGROK_DOMAIN" --log=stdout > ngrok.log 2>&1 &
-            echo $! > ngrok.pid
-            code=000
-            healthy=0
-            for attempt in $(seq 1 20); do
-              if ! kill -0 "$(cat ngrok.pid)" 2>/dev/null; then
-                echo "ngrok exited (round $round, attempt $attempt, last HTTP status: $code)."
-                break
-              fi
-              # The public health check is the readiness gate: the service counts as live only when it passes.
-              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'ngrok-skip-browser-warning: 1' "https://$NGROK_DOMAIN/api/health") || code=000
-              if [ "$code" = "200" ]; then
-                echo "Tunnel is live and the public health check passed (round $round, attempt $attempt)."
-                healthy=1
-                break
-              fi
-              sleep 3
-            done
-            [ "$healthy" = "1" ] && exit 0
-            kill -KILL "$(cat ngrok.pid)" 2>/dev/null || true
-            [ "$round" -lt 8 ] && sleep 15
+          code=000
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$PUBLIC_URL/api/health") || code=000
+            if [ "$code" = "200" ]; then
+              echo "Tunnel is live and the public health check passed (attempt $attempt)."
+              exit 0
+            fi
+            sleep 4
           done
-          echo "::error::Could not start the tunnel on $NGROK_DOMAIN after 8 rounds (last public HTTP status: $code). Check that no other tunnel is using the domain."
+          echo "::error::The public URL $PUBLIC_URL did not return 200 (last HTTP status: $code)."
           exit 1
 
       - name: Keep running
@@ -214,14 +217,14 @@ jobs:
               echo "::error::The app stopped early."
               exit 1
             fi
-            if ! kill -0 "$(cat ngrok.pid)" 2>/dev/null; then
+            if ! kill -0 "$(cat cloudflared.pid)" 2>/dev/null; then
               echo "::error::The tunnel stopped early."
               exit 1
             fi
             now=$(date +%s)
             if [ $((now - last_probe)) -ge 60 ]; then
               last_probe=$now
-              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -H 'ngrok-skip-browser-warning: 1' "https://$NGROK_DOMAIN/api/health") || code=000
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$PUBLIC_URL/api/health") || code=000
               if [ "$code" = "200" ]; then
                 failures=0
               else
@@ -242,7 +245,7 @@ jobs:
         if: always()
         run: |
           set -uo pipefail
-          # Stop the tunnel first so the domain is released, then the app. Each gets 20 s to exit before SIGKILL.
+          # Stop the tunnel first, then the app. Each gets 20 s to exit before SIGKILL.
           stop_pid() {
             local file="$1" name="$2" pid
             [ -f "$file" ] || { echo "$name: no PID file"; return 0; }
@@ -256,7 +259,7 @@ jobs:
             kill -KILL "$pid" 2>/dev/null || true
             echo "$name: did not stop within 20 s, killed"
           }
-          stop_pid ngrok.pid "ngrok tunnel"
+          stop_pid cloudflared.pid "cloudflared tunnel"
           stop_pid app.pid "app"
           true
 
@@ -270,14 +273,13 @@ jobs:
       - name: Diagnostics (redacted)
         if: failure()
         env:
-          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
           PRIVATE_DATA_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
         run: |
           python3 - <<'EOF'
           import os
-          secrets = [os.environ.get(k, "") for k in ("NGROK_AUTHTOKEN", "PRIVATE_DATA_TOKEN", "SESSION_SECRET")]
-          for name in ("app.log", "ngrok.log"):
+          secrets = [os.environ.get(k, "") for k in ("PRIVATE_DATA_TOKEN", "SESSION_SECRET")]
+          for name in ("app.log", "cloudflared.log"):
               if not os.path.exists(name):
                   print(f"{name}: not written")
                   continue
@@ -299,11 +301,11 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           {
-            echo "## Live app on ngrok: this run"
+            echo "## Live app on Cloudflare: this run"
             echo ""
             echo "| Item | Value |"
             echo "| --- | --- |"
-            echo "| Public URL | https://${NGROK_DOMAIN} |"
+            echo "| Public URL | ${PUBLIC_URL:-not established} |"
             echo "| Trigger | ${EVENT} |"
             echo "| Minutes | ${REQUESTED_MINUTES} |"
             echo "| Self-heal restarts left (requested) | ${REQUESTED_RESTARTS} |"
