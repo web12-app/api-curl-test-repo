@@ -45,6 +45,7 @@ on:
 
 permissions:
   contents: read
+  deployments: write
 
 # One session at a time. A new run (push, schedule, or manual) cancels the previous session and takes over, so
 # edits to main go live within a few minutes. The relay only dispatches a follow-up after the previous tunnel is
@@ -62,6 +63,9 @@ env:
   CLOUDFLARED_VERSION: "2026.10.1"
   CLOUDFLARED_SHA256: "3bfc539f45d2620c71debb7a86be0efa737ed5ccbad9eb85c787116900e5c586"
   APP_PORT: "3000"
+  # The lives entry page (GitHub Pages) that the run's public URL is published to.
+  LIVE_PUBLISH_REPO: web12-app/lives
+  LIVE_PUBLISH_BRANCH: main
   WORKFLOW_FILE: live-tunnel.yml
 
 jobs:
@@ -203,6 +207,27 @@ jobs:
           echo "::error::The public URL $PUBLIC_URL did not return 200 (last HTTP status: $code)."
           exit 1
 
+      - name: Publish live URL to the lives entry
+        # A publish problem never stops the live site; it only leaves the entry page on the previous URL.
+        continue-on-error: true
+        env:
+          LIVE_PUBLISH_TOKEN: ${{ secrets.LIVE_PUBLISH_TOKEN }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: python3 scripts/publish-live-url.py "$PUBLIC_URL"
+
+      - name: Record the live URL as a deployment
+        # The lives sync reads this through the GitHub API. A failure here never stops the site.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          dep=$(jq -n --arg ref "$GITHUB_SHA" --arg run "$RUN_ID" '{ref:$ref, environment:"live", transient_environment:true, production_environment:false, auto_merge:false, required_contexts:[], payload:{run_id:$run}}' | gh api -X POST "repos/$GITHUB_REPOSITORY/deployments" --input - --jq .id) || { echo "::warning::Could not create the deployment record."; exit 0; }
+          echo "DEPLOYMENT_ID=$dep" >> "$GITHUB_ENV"
+          jq -n --arg url "$PUBLIC_URL" '{state:"success", environment_url:$url}' | gh api -X POST "repos/$GITHUB_REPOSITORY/deployments/$dep/statuses" --input - > /dev/null || echo "::warning::Could not record the live URL status."
+          echo "Recorded $PUBLIC_URL as live deployment $dep."
+
       - name: Keep running
         id: keep
         env:
@@ -262,6 +287,20 @@ jobs:
           stop_pid cloudflared.pid "cloudflared tunnel"
           stop_pid app.pid "app"
           true
+
+      - name: Mark the live URL inactive
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          [ -n "${DEPLOYMENT_ID:-}" ] || { echo "No deployment record to close."; exit 0; }
+          if jq -n '{state:"inactive"}' | gh api -X POST "repos/$GITHUB_REPOSITORY/deployments/$DEPLOYMENT_ID/statuses" --input - > /dev/null; then
+            echo "Marked deployment $DEPLOYMENT_ID inactive."
+          else
+            echo "::warning::Could not mark deployment $DEPLOYMENT_ID inactive."
+          fi
 
       - name: Measure run duration
         id: wrap

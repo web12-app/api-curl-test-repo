@@ -75,4 +75,4 @@ curl -s http://localhost:3000/api/health
 
 - [User guide](user-guide.md): what every dashboard control does.
 - [Configuration](configuration.md): limits you can change and the variables for hosting.
-- [Operations](operations.md): run the app publicly through the ngrok workflow.
+- [Operations](operations.md): run the app publicly through the Cloudflare Quick Tunnel workflow.

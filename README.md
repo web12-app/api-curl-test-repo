@@ -67,7 +67,7 @@ src/pages.js            HTML pages (welcome, auth, share, upload links) and the 
 client/                 React source for /home and /explore (bundled by esbuild)
 public/assets/app.js    the compiled React bundle, committed so npm start needs no build
 pages/                  static welcome pages (not served by the Node app)
-.github/workflows/      live-tunnel.yml: run the app on a GitHub runner with an ngrok domain
+.github/workflows/      live-tunnel.yml: run the app on a GitHub runner behind a Cloudflare Quick Tunnel
 test/                   node:test suites and a fake GitHub
 docs/                   documentation
 ```

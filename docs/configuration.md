@@ -91,7 +91,6 @@ The `live-tunnel` workflow reads these. Names only; keep values in GitHub.
 
 | Name | Purpose |
 | --- | --- |
-| `NGROK_AUTHTOKEN` | ngrok authentication for the tunnel. |
 | `PRIVATE_DATA_TOKEN` | GitHub token passed to the app as `GITHUB_TOKEN`. |
 | `SESSION_SECRET` | Session signing key, at least 32 characters. |
 
@@ -103,10 +102,10 @@ The `live-tunnel` workflow reads these. Names only; keep values in GitHub.
 | `FILE_STORAGE_REPO` | `GITHUB_STORAGE_REPO` | Same reason. |
 | `CHAT_MODEL_ENABLED` | `CHAT_AUTOPROVISION` | Set to `true` to make the live tunnel download the model runtime and serve the `/chat` page. Any other value (or unset) keeps the site exactly as before. |
 
-The workflow file also sets `PRIVATE_DATA_REPO`, `CORS_ALLOWED_ORIGINS`, and the ngrok domain. These are not secret, and they are written in the workflow file.
+The workflow file also sets `PRIVATE_DATA_REPO` and the pinned cloudflared version and checksum. These are not secret, and they are written in the workflow file. `CORS_ALLOWED_ORIGINS` is set for each run from that run's Quick Tunnel URL.
 
 ## Variables you should never see in the repo
 
 - `.env` (ignored by git)
-- Tokens, session secrets, or ngrok tokens in code, tests, logs, or static pages
+- Tokens or session secrets in code, tests, logs, or static pages
 - Real repo names of private data in test fixtures. The tests use a fake GitHub.
