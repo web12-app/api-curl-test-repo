@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish this run's public URL to the lives Pages repo (live.json).
+"""Publish this run's public URL to the lives repo (live.json), through the GitHub API.
 
 Usage: publish-live-url.py <https-url> [--dry-run]
 
@@ -56,7 +56,7 @@ def build_body(url, run_id):
     return {
         'url': url,
         'updated_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-        'note': 'Current live URL. Entry page redirects here.',
+        'note': 'Current live URL, read through the GitHub API (scripts/get_live.py).',
         'run_id': run_id,
     }
 
