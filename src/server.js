@@ -566,6 +566,31 @@ async function apiHealth(ctx) {
   sendJson(ctx.res, 200, { status: 'ok' });
 }
 
+// Live status for the home page. createServer fills this in from the environment. PUBLIC_URL and
+// LIVE_RUN_ID are set by the live-tunnel workflow; locally both are absent.
+let liveStatusInfo = { publicUrl: null, runId: null, startedAt: new Date() };
+
+function liveStatusFromEnv(env) {
+  const raw = String(env.PUBLIC_URL || '').trim();
+  const publicUrl = /^https:\/\/[A-Za-z0-9.-]+(:[0-9]+)?$/.test(raw) ? raw : null;
+  const runId = String(env.LIVE_RUN_ID || '').replace(/[^0-9]/g, '') || null;
+  return { publicUrl, runId, startedAt: new Date() };
+}
+
+// Public and read-only: the URL, run number, start time, and uptime. No account or secret data.
+async function apiLiveStatus(ctx) {
+  const now = Date.now();
+  const info = liveStatusInfo;
+  sendJson(ctx.res, 200, {
+    status: 'live',
+    url: info.publicUrl,
+    runId: info.runId,
+    startedAt: info.startedAt.toISOString(),
+    uptimeSeconds: Math.floor((now - info.startedAt.getTime()) / 1000),
+    checkedAt: new Date(now).toISOString(),
+  });
+}
+
 // Every signup and login also mints a unique API token. It is shown once and
 // stored only as a SHA-256 hash; API clients send it as `Authorization: Bearer <token>`.
 async function apiSignup(ctx) {
@@ -2158,6 +2183,7 @@ const ROUTES = [
   { method: 'GET', path: '/sw.js', handler: pageSwJs },
   { method: 'GET', path: '/sw-register.js', handler: pageSwRegisterJs },
   { method: 'GET', path: '/api/health', handler: apiHealth },
+  { method: 'GET', path: '/api/live-status', handler: apiLiveStatus },
   { method: 'GET', path: '/login', handler: pageAuthForm('login') },
   { method: 'GET', path: '/signup', handler: pageAuthForm('signup') },
   { method: 'POST', path: '/login', handler: formLogin },
@@ -2412,6 +2438,7 @@ async function dispatch(req, res, auth, corsOrigins, modelChat, tunnels) {
 function createServer(options = {}) {
   const env = options.env || process.env;
   releaseApiBase = env.PIPS_RELEASE_API_BASE || 'https://api.github.com';
+  liveStatusInfo = liveStatusFromEnv(env);
   const auth = buildAuth(env, options);
   const corsOrigins = parseCorsOrigins(env.CORS_ALLOWED_ORIGINS);
   const modelChat = buildModelChat(env, options);
