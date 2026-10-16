@@ -62,6 +62,9 @@ env:
   CLOUDFLARED_VERSION: "2026.10.1"
   CLOUDFLARED_SHA256: "3bfc539f45d2620c71debb7a86be0efa737ed5ccbad9eb85c787116900e5c586"
   APP_PORT: "3000"
+  # The lives entry page (GitHub Pages) that the run's public URL is published to.
+  LIVE_PUBLISH_REPO: web12-app/lives
+  LIVE_PUBLISH_BRANCH: main
   WORKFLOW_FILE: live-tunnel.yml
 
 jobs:
@@ -202,6 +205,14 @@ jobs:
           done
           echo "::error::The public URL $PUBLIC_URL did not return 200 (last HTTP status: $code)."
           exit 1
+
+      - name: Publish live URL to the lives entry
+        # A publish problem never stops the live site; it only leaves the entry page on the previous URL.
+        continue-on-error: true
+        env:
+          LIVE_PUBLISH_TOKEN: ${{ secrets.LIVE_PUBLISH_TOKEN }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: python3 scripts/publish-live-url.py "$PUBLIC_URL"
 
       - name: Keep running
         id: keep

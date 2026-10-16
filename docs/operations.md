@@ -15,7 +15,8 @@ Each run:
 5. Starts `node src/server.js` on port 3000 with the secrets, the repository variables, and that URL as the allowed browser origin. Waits for `/api/health` to return `200` locally, then for the public URL to return `200`. Only then is the service "live".
 6. Keeps running for the requested minutes. It checks the app and the tunnel every 15 seconds, and checks the public health every minute. Three failed public checks in a row end the run.
 7. Stops the tunnel first, then the app.
-8. Writes a run summary with the public URL and the outcome.
+8. Publishes the URL to the lives entry page (`live.json` in `web12-app/lives`) when `LIVE_PUBLISH_TOKEN` is set. A failure here does not stop the site.
+9. Writes a run summary with the public URL and the outcome.
 
 Only one run can use the `live-tunnel` concurrency group at a time, so a second run waits.
 
@@ -62,6 +63,7 @@ The **Next run** section says whether a follow-up was requested, and why not if 
 | Name | Type | Purpose |
 | --- | --- | --- |
 | `PRIVATE_DATA_TOKEN` | secret | GitHub token for the private data repo and storage repo |
+| `LIVE_PUBLISH_TOKEN` | secret | Fine-grained token with Contents read/write on `web12-app/lives` only. Each run writes its new URL to `live.json` there. Without it the entry page is not updated. |
 | `SESSION_SECRET` | secret | At least 32 characters |
 | `FILE_STORAGE_OWNER` | variable | Owner of the storage repo |
 | `FILE_STORAGE_REPO` | variable | Name of the storage repo |
