@@ -17,7 +17,7 @@ This folder documents the file storage app: accounts, a personal file dashboard,
 - **Accounts** are stored in a private GitHub repository (the *private data repo*). Passwords are stored only as scrypt hashes.
 - **Files** are stored as release assets in a second private GitHub repository (the *storage repo*), one release per upload. Metadata for each user lives in one JSON manifest in the private data repo.
 - The Node.js server (no framework, one runtime dependency: `busboy`) serves the pages and the JSON API.
-- The **workflow** `live-tunnel` runs the app on a GitHub runner and exposes it through a fixed ngrok domain for a set number of minutes.
+- The **workflow** `live-tunnel` runs the app on a GitHub runner and exposes it through a free Cloudflare Quick Tunnel (a random `trycloudflare.com` URL per run) for a set number of minutes.
 
 ## Words used in these docs
 
