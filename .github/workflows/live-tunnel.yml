@@ -161,6 +161,8 @@ jobs:
           LIVE_RUN_ID: ${{ github.run_id }}
           GITHUB_TOKEN: ${{ secrets.PRIVATE_DATA_TOKEN }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          # AI mode key for /api/search/ai (OpenRouter). Read only by the server; never printed or returned.
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           # File storage settings. Repository variables (not secrets). GitHub reserves the GITHUB_ prefix for
           # variable names, so the variables are FILE_STORAGE_*. Without them, login still works and files are disabled.
           GITHUB_OWNER: ${{ vars.FILE_STORAGE_OWNER }}

@@ -22,6 +22,7 @@ const { USERNAME_RE } = require('./paths');
 const { ModelChat } = require('./model-chat');
 const { ChatJobs } = require('./chat-jobs');
 const { ModelCache } = require('./model-cache');
+const search = require('./search');
 const { OpenAiCompat, sendV1Error, sendV1Json } = require('./openai-compat');
 const apiTokens = require('./api-tokens');
 const { PipsDb } = require('./pipsdb');
@@ -1387,6 +1388,40 @@ async function apiDeleteFile(ctx) {
 
 const TUBE_WRITES_PER_HOUR = 120;
 
+// ---- Search: videos, channels and files; suggestions; an AI answer that cites the results.
+const AI_PER_HOUR = 30;
+const AI_WINDOW_MS = 60 * 60 * 1000;
+
+async function apiSearch(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  const q = ctx.url.searchParams.get('q') || '';
+  const kind = ctx.url.searchParams.get('kind') || 'all';
+  ok(ctx, 200, await search.run({ tube: files.tube, files: files.service, uid: user.id, username: user.username, q, kind }));
+}
+
+async function apiSearchSuggest(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  const q = ctx.url.searchParams.get('q') || '';
+  ok(ctx, 200, await search.suggest({ tube: files.tube, files: files.service, uid: user.id, username: user.username, q }));
+}
+
+async function apiSearchAi(ctx) {
+  const files = fileServices(ctx);
+  const user = await requireUser(ctx);
+  requireCsrfHeader(ctx);
+  const body = await readJsonBody(ctx);
+  const q = String(body.q || '').trim();
+  if (ctx.auth.limiter.count(`ai:${user.id}`, AI_WINDOW_MS) > AI_PER_HOUR) {
+    throw new AppError(429, 'AI_RATE_LIMITED', 'Too many AI questions this hour. Try again later.');
+  }
+  const results = await search.run({
+    tube: files.tube, files: files.service, uid: user.id, username: user.username, q, kind: 'all', limit: 8,
+  });
+  ok(ctx, 200, await search.answer({ query: q, results }));
+}
+
 async function apiTubeFeed(ctx) {
   const files = fileServices(ctx);
   const user = await requireUser(ctx);
@@ -2252,6 +2287,9 @@ const ROUTES = [
   { method: 'POST', pattern: new RegExp(`^/u/(${TOKEN})/upload$`), handler: postUploadLink, csrfExempt: true },
   // ---- Tube: channels and published videos. All behind login, like the rest of the app.
   { method: 'GET', path: '/api/tube/feed', handler: apiTubeFeed },
+  { method: 'GET', path: '/api/search', handler: apiSearch },
+  { method: 'GET', path: '/api/search/suggest', handler: apiSearchSuggest },
+  { method: 'POST', path: '/api/search/ai', handler: apiSearchAi },
   { method: 'GET', path: '/api/tube/my-channel', handler: apiTubeMyChannelGet },
   { method: 'PUT', path: '/api/tube/my-channel', handler: apiTubeMyChannelPut },
   {
