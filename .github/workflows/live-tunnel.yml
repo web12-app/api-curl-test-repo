@@ -44,7 +44,7 @@ on:
     - cron: "37 */5 * * *"
 
 permissions:
-  contents: read
+  contents: write
   deployments: write
 
 # One session at a time. A new run (push, schedule, or manual) cancels the previous session and takes over, so
@@ -230,6 +230,15 @@ jobs:
           echo "DEPLOYMENT_ID=$dep" >> "$GITHUB_ENV"
           jq -n --arg url "$PUBLIC_URL" '{state:"success", environment_url:$url}' | gh api -X POST "repos/$GITHUB_REPOSITORY/deployments/$dep/statuses" --input - > /dev/null || echo "::warning::Could not record the live URL status."
           echo "Recorded $PUBLIC_URL as live deployment $dep."
+
+      - name: Save the live URL to the repo and create a release
+        # live-url.json on the live-url branch, plus a pre-release tagged live-<run id> with the file attached.
+        # A failure here never stops the site.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLIC_URL: ${{ env.PUBLIC_URL }}
+        run: python3 scripts/record_live_url.py
 
       - name: Keep running
         id: keep
