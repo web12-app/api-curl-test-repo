@@ -31,7 +31,7 @@ Only one run can use the `live-tunnel` concurrency group at a time, so a second 
 | `minutes` | 1 to 300 (default 60) | How long the tunnel stays open. |
 | `auto_restarts` | 0 to 100 (default 24) | How many follow-up runs to request when a run reaches its time limit. |
 
-The public URL is a random `https://<words>.trycloudflare.com` address created for each run. It is printed in the run summary and in the *Start Cloudflare tunnel* log. A new run gets a new URL, so anything that links to the site (for example the lives Pages entry) must be updated after each run.
+The public URL is a random `https://<words>.trycloudflare.com` address created for each run. It is printed in the run summary and in the *Start Cloudflare tunnel* log. A new run gets a new URL, so anything that reads the URL (for example `live.json` in `web12-app/lives`, read by `scripts/get_live.py`) is updated after each run.
 
 ### The automatic follow-up chain
 

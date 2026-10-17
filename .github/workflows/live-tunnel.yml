@@ -13,7 +13,7 @@
 #   a few minutes. Each takeover has a short (~2-4 min) downtime while the new run boots.
 # - Cloudflare Quick Tunnels are free and need no account or token, but each run gets a NEW random
 #   https://<words>.trycloudflare.com URL. The URL is printed in the run summary. Anything that links to the
-#   site (for example the lives Pages entry) must be updated when it changes.
+#   site (for example the live.json in web12-app/lives, read through the GitHub API) must be updated when it changes.
 #
 #
 # Secrets (Settings > Secrets and variables > Actions > Secrets):
@@ -63,7 +63,7 @@ env:
   CLOUDFLARED_VERSION: "2026.10.1"
   CLOUDFLARED_SHA256: "3bfc539f45d2620c71debb7a86be0efa737ed5ccbad9eb85c787116900e5c586"
   APP_PORT: "3000"
-  # The lives entry page (GitHub Pages) that the run's public URL is published to.
+  # The lives repo (web12-app/lives): the run's public URL is written to its live.json through the GitHub API.
   LIVE_PUBLISH_REPO: web12-app/lives
   LIVE_PUBLISH_BRANCH: main
   WORKFLOW_FILE: live-tunnel.yml
