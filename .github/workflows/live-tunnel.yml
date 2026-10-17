@@ -261,15 +261,17 @@ jobs:
             now=$(date +%s)
             if [ $((now - last_probe)) -ge 60 ]; then
               last_probe=$now
-              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$PUBLIC_URL/api/health") || code=000
+              # A busy runner (model download, chat runtime) can answer slowly. One probe may take up to 20 s, and
+              # the run ends only after 6 probes in a row fail (about 6 minutes), not after 3.
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$PUBLIC_URL/api/health") || code=000
               if [ "$code" = "200" ]; then
                 failures=0
               else
                 failures=$((failures + 1))
                 echo "Public health check failed (HTTP $code). $failures in a row."
               fi
-              if [ "$failures" -ge 3 ]; then
-                echo "::error::The public health check failed 3 times in a row."
+              if [ "$failures" -ge 6 ]; then
+                echo "::error::The public health check failed 6 times in a row."
                 exit 1
               fi
             fi
