@@ -1,0 +1,67 @@
+name: Background URL upload
+
+# Each URL runs on its own runner, in parallel. Output is suppressed on purpose:
+# the run shows only its status (queued, running, success, failure).
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'JSON array of https URLs, e.g. ["https://example.com/a.mp4"]'
+        required: true
+        type: string
+      max_parallel:
+        description: 'Runners at once (1-8)'
+        required: false
+        default: '4'
+        type: string
+
+run-name: Background upload (${{ inputs.max_parallel }} at a time)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: background-upload-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - name: Build the runner list
+        id: m
+        env:
+          URLS: ${{ inputs.urls }}
+        run: |
+          python3 -c '
+          import json, os
+          urls = json.loads(os.environ["URLS"])
+          assert isinstance(urls, list) and 1 <= len(urls) <= 50
+          assert all(isinstance(u, str) and u.startswith("https://") for u in urls)
+          print("matrix=" + json.dumps({"include": [{"index": i, "url": u} for i, u in enumerate(urls)]}))
+          ' >> "$GITHUB_OUTPUT" 2>/dev/null
+
+  upload:
+    needs: plan
+    name: upload ${{ matrix.index }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Get the uploader
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Download and upload
+        env:
+          SOURCE_URL: ${{ matrix.url }}
+          PIPS_UPLOAD_TOKEN: ${{ secrets.PIPS_UPLOAD_TOKEN }}
+        run: python3 scripts/background_upload.py > /dev/null 2>&1
